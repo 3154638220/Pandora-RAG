@@ -1,0 +1,90 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# --- Virtual environments ---
+.venv/
+venv/
+ENV/
+env/
+.env/
+
+# --- Secrets & local env (keep .env.example tracked) ---
+.env
+.env.*
+!.env.example
+
+# --- IDE / editor ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# --- Hugging Face & generic ML caches ---
+.cache/
+**/.cache/huggingface/
+
+# --- Large model / checkpoint binaries (configs JSON 等仍可提交) ---
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.gguf
+*.h5
+*.msgpack
+
+# --- 本仓库：可再生的中间数据与轨迹（若需版本化某子集，可改为更细规则） ---
+cache/
+artifacts/
+data/processed/
+
+# --- Logs ---
+*.log
+logs/
+
+# --- Testing / coverage / linters ---
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+.pytype/
+
+# --- 实验跟踪（若使用） ---
+wandb/
