@@ -14,12 +14,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import logging
 import math
 import os
 import random
+import re
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -29,15 +29,27 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# 未设置 HF_ENDPOINT 时默认走 hf-mirror，减轻国内直连 huggingface.co 的延迟。
+if os.environ.get("PANDORA_NO_CN_HF_MIRROR", "").lower() not in ("1", "true", "yes"):
+    if not (os.environ.get("HF_ENDPOINT") or "").strip():
+        os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+
 from datasets import Dataset, load_dataset
 from tqdm import tqdm
-
-from dotenv import load_dotenv
 
 from pretest.utils.llm_client import LLMClient
 from pretest.utils.metrics import compute_metrics
 from pretest.utils.retriever import BM25Retriever
-from pretest.utils.weitzman import compute_all_reservation_values, oracle_stopping_simulation
+from pretest.utils.weitzman import (
+    compute_all_reservation_values,
+    compute_trajectory_oracle,
+    oracle_stopping_simulation,
+    trajectory_cumulative_cost,
+)
 
 # Hugging Face 上可用的 Parquet 镜像（旧名 musique / 2wikimultihopqa 已不可用）
 HF_DATASET_IDS = {
@@ -45,6 +57,11 @@ HF_DATASET_IDS = {
     "musique": ("dgslibisey/MuSiQue", None),
     "2wiki": ("framolfese/2WikiMultihopQA", None),
 }
+
+# 勿请求 HF 的 test split，由 prepare_data 从 validation 尾部切出 test：
+# - hotpotqa / musique：镜像无 test；
+# - 2wiki：framolfese 镜像的 test 分割 gold 为空（answer、supporting_facts 全空），无法算 F1/Oracle。
+HF_DATASETS_WITHOUT_TEST_SPLIT = frozenset({"hotpotqa", "musique", "2wiki"})
 
 DEFAULT_LLM_MODEL = "meta-llama/Meta-Llama-3.1-8B-Instruct"
 DEFAULT_LLM_API_BASE = "http://127.0.0.1:8000/v1"
@@ -62,7 +79,10 @@ class Stage1Config:
     temperature: float = 0.7
     n_samples: int = 10
     cost_per_step: float = 0.05
+    oracle_cost_metric: str = "fixed"
     embed_dim: int = 256
+    hidden_state_model: Optional[str] = None
+    hidden_state_max_length: int = 2048
     root_dir: Path = Path(".")
 
     @property
@@ -134,19 +154,140 @@ def _heuristic_nli(question: str, context: str) -> Tuple[float, float]:
     return float(entail), float(contra)
 
 
-def _synthetic_embedding(text: str, dim: int) -> np.ndarray:
-    if not text:
-        return np.zeros((dim,), dtype=np.float16)
-    values = np.zeros((dim,), dtype=np.float32)
-    for idx, token in enumerate(text.lower().split()):
-        digest = hashlib.sha256(token.encode("utf-8")).digest()
-        bucket = int.from_bytes(digest[:4], byteorder="big") % dim
-        sign = -1.0 if digest[4] % 2 else 1.0
-        values[bucket] += sign * (1.0 / (1.0 + idx))
-    norm = np.linalg.norm(values)
-    if norm > 0:
-        values /= norm
-    return values.astype(np.float16)
+def _resolve_hidden_state_device(torch_module: Any) -> str:
+    """
+    为 transformers 侧选择运行设备。
+    - 未设置 HIDDEN_STATE_DEVICE 或设为 auto：在可见 GPU 中选剩余显存（free）最大的一张。
+    - 否则：cpu / cuda:N / cuda:0 等形式按字面使用（便于调试或与 vLLM 错卡）。
+    """
+    raw = (os.getenv("HIDDEN_STATE_DEVICE") or "").strip()
+    if raw:
+        low = raw.lower()
+        if low == "auto":
+            pass
+        elif low == "cpu":
+            return "cpu"
+        elif low.startswith("cuda:"):
+            return raw
+        elif raw.isdigit():
+            return f"cuda:{raw}"
+        return raw
+
+    if not torch_module.cuda.is_available():
+        return "cpu"
+
+    best_idx = 0
+    best_free = -1
+    for idx in range(torch_module.cuda.device_count()):
+        free_b, _total_b = torch_module.cuda.mem_get_info(idx)
+        if free_b > best_free:
+            best_free = free_b
+            best_idx = idx
+    dev = f"cuda:{best_idx}"
+    LOGGER.info(
+        "HiddenStateExtractor 选用剩余显存最多的 GPU: %s (约 %.2f GiB 空闲)",
+        dev,
+        best_free / (1024**3),
+    )
+    return dev
+
+
+def _resolve_local_llama_weights_dir(cfg: Stage1Config) -> Optional[Path]:
+    """
+    解析 Meta-Llama-3.1-8B-Instruct 本地权重目录（与 STORAGE_LAYOUT.md 一致：仓库内 models/ 常 symlink 到 haoge）。
+    顺序：--root-dir 下 models/ → 本仓库根目录 models/ → 环境变量 PANDORA_MODELS_ROOT。
+    """
+    name = "Meta-Llama-3.1-8B-Instruct"
+    repo_root = Path(__file__).resolve().parent.parent
+    candidates: List[Path] = [
+        cfg.root_dir / "models" / name,
+        repo_root / "models" / name,
+    ]
+    env_root = (os.getenv("PANDORA_MODELS_ROOT") or "").strip()
+    if env_root:
+        candidates.append(Path(env_root) / name)
+    for p in candidates:
+        if p.is_dir() and (p / "config.json").exists():
+            return p
+    return None
+
+
+class HiddenStateExtractor:
+    """Extracts real final-layer hidden states from a causal LM."""
+
+    def __init__(self, cfg: Stage1Config):
+        try:
+            import torch
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+        except ImportError as exc:
+            raise ImportError(
+                "提取真实 hidden states 需要安装 transformers 与 torch。"
+                "请先执行: pip install -U transformers torch"
+            ) from exc
+
+        model_hint = (cfg.hidden_state_model or "").strip()
+        env_model = (os.getenv("HIDDEN_STATE_MODEL") or "").strip()
+        model_name = model_hint or env_model or os.getenv("LLM_MODEL", DEFAULT_LLM_MODEL)
+        local_llama_path = _resolve_local_llama_weights_dir(cfg)
+        if not model_hint and not env_model and local_llama_path is not None:
+            model_name = str(local_llama_path)
+
+        self._torch = torch
+        self.max_length = max(64, int(cfg.hidden_state_max_length))
+        self.model_name = model_name
+        self.device = _resolve_hidden_state_device(torch)
+
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        dtype = torch.float16 if str(self.device).startswith("cuda") else torch.float32
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=dtype,
+            trust_remote_code=True,
+        )
+        self.model.to(self.device)
+        self.model.eval()
+
+        LOGGER.info(
+            "HiddenStateExtractor ready: model=%s, device=%s, max_length=%d",
+            self.model_name,
+            self.device,
+            self.max_length,
+        )
+
+    def extract(self, question: str, context: str, answer: str) -> Tuple[np.ndarray, np.ndarray]:
+        prompt = (
+            "你是一个严谨的问答助手。请根据以下检索到的上下文回答问题。\n"
+            "如无法确定，仍需给出最佳猜测，请直接输出答案（一个词组或短语），不要解释。\n\n"
+            f"问题：{question}\n\n"
+            f"已检索上下文：\n{context}\n\n"
+            f"答案：{answer}"
+        )
+        encoded = self.tokenizer(
+            prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=self.max_length,
+        )
+        encoded = {k: v.to(self.device) for k, v in encoded.items()}
+
+        with self._torch.no_grad():
+            outputs = self.model(**encoded, output_hidden_states=True, use_cache=False)
+
+        last_layer = outputs.hidden_states[-1][0]  # [seq_len, hidden_dim]
+        attn_mask = encoded["attention_mask"][0].bool()
+        valid_states = last_layer[attn_mask]
+        if valid_states.shape[0] == 0:
+            valid_states = last_layer
+
+        last_token = valid_states[-1]
+        mean_pool = valid_states.mean(dim=0)
+        return (
+            last_token.detach().cpu().to(self._torch.float16).numpy(),
+            mean_pool.detach().cpu().to(self._torch.float16).numpy(),
+        )
 
 
 def _sample_answers(base_answer: str, n: int, rng: random.Random) -> List[str]:
@@ -225,16 +366,63 @@ def _to_docs_from_raw(example: Dict[str, Any]) -> List[str]:
     return [d for d in docs if d]
 
 
+def _extract_hop_count(example: Dict[str, Any], dataset_name: str, record_id: str) -> int:
+    """Heuristically extract ground-truth required hop count."""
+
+    def _from_supporting_facts(obj: Any) -> int:
+        if isinstance(obj, dict):
+            titles = obj.get("title")
+            if isinstance(titles, list):
+                uniq = {_normalize_text(t) for t in titles if _normalize_text(t)}
+                if uniq:
+                    return len(uniq)
+        if isinstance(obj, list):
+            uniq_titles = set()
+            for item in obj:
+                if isinstance(item, (list, tuple)) and item:
+                    title = _normalize_text(item[0])
+                    if title:
+                        uniq_titles.add(title)
+                elif isinstance(item, dict):
+                    title = _normalize_text(item.get("title"))
+                    if title:
+                        uniq_titles.add(title)
+            if uniq_titles:
+                return len(uniq_titles)
+        return -1
+
+    ds = dataset_name.lower()
+    sf_hop = _from_supporting_facts(example.get("supporting_facts"))
+    if sf_hop > 0:
+        return sf_hop
+
+    if "musique" in ds:
+        decomposition = example.get("question_decomposition") or example.get("decomposition")
+        if isinstance(decomposition, list) and decomposition:
+            return len(decomposition)
+        m = re.match(r"^\s*(\d+)hop__", record_id)
+        if m:
+            return int(m.group(1))
+        return -1
+
+    if "hotpotqa" in ds:
+        return 2
+
+    return -1
+
+
 def _normalize_record(example: Dict[str, Any], dataset_name: str, split: str, idx: int) -> Dict[str, Any]:
     q = _normalize_text(example.get("question") or example.get("query") or example.get("input"))
     a = _normalize_text(example.get("answer") or example.get("answers") or example.get("output"))
     record_id = _normalize_text(example.get("id") or example.get("_id")) or f"{dataset_name}_{split}_{idx:07d}"
+    gt_hop_count = _extract_hop_count(example, dataset_name, record_id)
     return {
         "id": record_id,
         "dataset": dataset_name,
         "split": split,
         "question": q,
         "answer": a,
+        "gt_hop_count": int(gt_hop_count),
         "supporting_facts": example.get("supporting_facts", None),
         "documents": _to_docs_from_raw(example),
     }
@@ -247,6 +435,34 @@ def _sample_indices(n_total: int, wanted: int, rng: random.Random) -> List[int]:
     rng.shuffle(all_idx)
     selected = sorted(all_idx[:wanted])
     return selected
+
+
+def _prepared_manifest_path(cfg: Stage1Config, dataset_name: str) -> Path:
+    return cfg.split_manifest_dir / f"{dataset_name}_seed{cfg.seed}_manifest.json"
+
+
+def _missing_prepared_artifacts(cfg: Stage1Config, dataset_name: str) -> List[Path]:
+    required: List[Path] = [
+        cfg.data_processed_dir / dataset_name / "train.jsonl",
+        cfg.data_processed_dir / dataset_name / "dev.jsonl",
+        cfg.data_processed_dir / dataset_name / "test.jsonl",
+        _prepared_manifest_path(cfg, dataset_name),
+    ]
+    return [p for p in required if not p.exists()]
+
+
+def _validate_skip_prepare_inputs(cfg: Stage1Config, dataset_name: str) -> None:
+    missing = _missing_prepared_artifacts(cfg, dataset_name)
+    if not missing:
+        return
+    missing_list = "\n".join(f"- {p}" for p in missing)
+    raise FileNotFoundError(
+        "检测到 --skip-prepare，但缺少预处理产物。\n"
+        f"数据集: {dataset_name}\n"
+        f"缺失文件:\n{missing_list}\n"
+        "请去掉 --skip-prepare 重新运行（prepare 阶段会从 Hugging Face 拉取并写出这些文件）；"
+        "若必须离线运行，请先手动准备上述文件。"
+    )
 
 
 def _load_hf_split(dataset_name: str, split_name: str) -> Optional[Dataset]:
@@ -269,10 +485,16 @@ def prepare_data(cfg: Stage1Config, dataset_name: str) -> Dict[str, int]:
     rng = random.Random(cfg.seed)
     train_raw = _load_hf_split(dataset_name, "train")
     val_raw = _load_hf_split(dataset_name, "validation")
-    test_raw = _load_hf_split(dataset_name, "test")
+    if dataset_name in HF_DATASETS_WITHOUT_TEST_SPLIT:
+        test_raw = None
+    else:
+        test_raw = _load_hf_split(dataset_name, "test")
 
     if train_raw is None and val_raw is None and test_raw is None:
-        raise RuntimeError(f"无法加载数据集 {dataset_name}，请检查 datasets 可用性或手动准备 data/processed。")
+        raise RuntimeError(
+            f"无法加载数据集 {dataset_name}。请检查 Hugging Face 可访问性（或 HF_ENDPOINT 设置），"
+            "或先手动准备 data/processed 与 data/splits。"
+        )
 
     train_list = list(train_raw) if train_raw is not None else []
     val_list = list(val_raw) if val_raw is not None else []
@@ -313,7 +535,7 @@ def prepare_data(cfg: Stage1Config, dataset_name: str) -> Dict[str, int]:
         manifest["selected_ids"][split] = [r["id"] for r in normalized]
         counts[split] = len(normalized)
 
-    manifest_path = cfg.split_manifest_dir / f"{dataset_name}_seed{cfg.seed}_manifest.json"
+    manifest_path = _prepared_manifest_path(cfg, dataset_name)
     with manifest_path.open("w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
 
@@ -331,7 +553,12 @@ def _retrieve_step_docs(question: str, current_answer: str, docs_pool: List[str]
     return docs[0], float(scores[0]), int(idxs[0])
 
 
-def collect_trajectories(cfg: Stage1Config, dataset_name: str, split: str) -> int:
+def collect_trajectories(
+    cfg: Stage1Config,
+    dataset_name: str,
+    split: str,
+    hidden_state_extractor: HiddenStateExtractor,
+) -> int:
     in_path = cfg.data_processed_dir / dataset_name / f"{split}.jsonl"
     if not in_path.exists():
         raise FileNotFoundError(f"缺少处理后数据：{in_path}")
@@ -400,8 +627,7 @@ def collect_trajectories(cfg: Stage1Config, dataset_name: str, split: str) -> in
                     }
                 )
 
-            embedding_last = _synthetic_embedding(current_answer, cfg.embed_dim)
-            embedding_mean = _synthetic_embedding(acc_context, cfg.embed_dim)
+            embedding_last, embedding_mean = hidden_state_extractor.extract(q, acc_context, current_answer)
             feat_path = feature_dir / f"{row['id']}.npz"
             np.savez_compressed(
                 feat_path,
@@ -417,6 +643,7 @@ def collect_trajectories(cfg: Stage1Config, dataset_name: str, split: str) -> in
                         "split": split,
                         "question": q,
                         "gold_answer": gold,
+                        "gt_hop_count": int(row.get("gt_hop_count", -1)),
                         "steps": steps,
                     },
                     ensure_ascii=False,
@@ -442,49 +669,110 @@ def compute_oracle_and_pareto(cfg: Stage1Config, dataset_name: str) -> Dict[str,
     dev_traj = _load_trajectory_jsonl(dev_path) if dev_path.exists() else []
     test_traj = _load_trajectory_jsonl(test_path)
 
-    reservation_values = compute_all_reservation_values(train_traj, cfg.max_k, cfg.cost_per_step)
-    oracle_dev = oracle_stopping_simulation(dev_traj, reservation_values, cfg.max_k) if dev_traj else []
-    oracle_test = oracle_stopping_simulation(test_traj, reservation_values, cfg.max_k)
+    global_reservation_values = compute_all_reservation_values(
+        train_traj, cfg.max_k, cfg.cost_per_step
+    )
+    oracle_dev = (
+        compute_trajectory_oracle(
+            dev_traj, cfg.cost_per_step, cfg.max_k, cost_metric=cfg.oracle_cost_metric
+        )
+        if dev_traj
+        else []
+    )
+    oracle_test = compute_trajectory_oracle(
+        test_traj, cfg.cost_per_step, cfg.max_k, cost_metric=cfg.oracle_cost_metric
+    )
+    static_weitzman_test = oracle_stopping_simulation(
+        test_traj, global_reservation_values, cfg.max_k
+    )
 
     rows: List[Dict[str, Any]] = []
     for k in range(1, cfg.max_k + 1):
         f1s: List[float] = []
         ems: List[int] = []
+        costs: List[float] = []
         for traj in test_traj:
             target = next((s for s in traj["steps"] if s["step"] == k), traj["steps"][-1])
             f1s.append(float(target["f1"]))
             ems.append(int(bool(target["em"])))
+            costs.append(
+                trajectory_cumulative_cost(
+                    traj, k, cfg.cost_per_step, cfg.max_k, cfg.oracle_cost_metric
+                )
+            )
         rows.append(
             {
                 "strategy": f"Fixed-K={k}",
                 "avg_steps": float(k),
+                "avg_cost": float(np.mean(costs) if costs else 0.0),
                 "avg_f1": float(np.mean(f1s) if f1s else 0.0),
                 "avg_em": float(np.mean(ems) if ems else 0.0),
             }
         )
 
+    static_costs = [
+        trajectory_cumulative_cost(
+            traj, int(r["steps_used"]), cfg.cost_per_step, cfg.max_k, cfg.oracle_cost_metric
+        )
+        for traj, r in zip(test_traj, static_weitzman_test)
+    ]
+    static_row = {
+        "strategy": "Global-Weitzman",
+        "avg_steps": float(
+            np.mean([r["steps_used"] for r in static_weitzman_test]) if static_weitzman_test else 0.0
+        ),
+        "avg_cost": float(np.mean(static_costs) if static_costs else 0.0),
+        "avg_f1": float(
+            np.mean([r["f1"] for r in static_weitzman_test]) if static_weitzman_test else 0.0
+        ),
+        "avg_em": float(
+            np.mean([int(r["em"]) for r in static_weitzman_test]) if static_weitzman_test else 0.0
+        ),
+    }
+    rows.append(static_row)
+
+    oracle_costs = [
+        trajectory_cumulative_cost(
+            traj, int(r["steps_used"]), cfg.cost_per_step, cfg.max_k, cfg.oracle_cost_metric
+        )
+        for traj, r in zip(test_traj, oracle_test)
+    ]
     oracle_row = {
         "strategy": "Oracle",
         "avg_steps": float(np.mean([r["steps_used"] for r in oracle_test]) if oracle_test else 0.0),
+        "avg_cost": float(np.mean(oracle_costs) if oracle_costs else 0.0),
         "avg_f1": float(np.mean([r["f1"] for r in oracle_test]) if oracle_test else 0.0),
         "avg_em": float(np.mean([int(r["em"]) for r in oracle_test]) if oracle_test else 0.0),
     }
     rows.append(oracle_row)
 
     df = pd.DataFrame(rows)
+    use_cost_x = cfg.oracle_cost_metric != "fixed"
+    x_key = "avg_cost" if use_cost_x else "avg_steps"
     fig, ax = plt.subplots(1, 1, figsize=(7.5, 5))
     for _, row in df.iterrows():
-        is_oracle = row["strategy"] == "Oracle"
+        strat = row["strategy"]
+        if strat == "Oracle":
+            color, marker, size = "#d62728", "*", 180
+        elif strat == "Global-Weitzman":
+            color, marker, size = "#ff7f0e", "^", 130
+        else:
+            color, marker, size = "#1f77b4", "o", 90
+        x_val = float(row[x_key])
         ax.scatter(
-            row["avg_steps"],
+            x_val,
             row["avg_f1"],
-            color="#d62728" if is_oracle else "#1f77b4",
-            marker="*" if is_oracle else "o",
-            s=180 if is_oracle else 90,
+            color=color,
+            marker=marker,
+            s=size,
             label=row["strategy"],
         )
-        ax.annotate(row["strategy"], (row["avg_steps"], row["avg_f1"]), fontsize=8)
-    ax.set_xlabel("Avg Cost (steps)")
+        ax.annotate(row["strategy"], (x_val, row["avg_f1"]), fontsize=8)
+    ax.set_xlabel(
+        "Avg cumulative cost (normalized)"
+        if use_cost_x
+        else "Avg cost (retrieval steps)"
+    )
     ax.set_ylabel("F1")
     ax.set_title(f"Stage1 Oracle Pareto - {dataset_name}")
     ax.grid(alpha=0.25)
@@ -500,23 +788,59 @@ def compute_oracle_and_pareto(cfg: Stage1Config, dataset_name: str) -> Dict[str,
     label_dir.mkdir(parents=True, exist_ok=True)
     label_path = label_dir / "test_oracle_labels.jsonl"
     label_rows = []
+    hop_alignment_counter: Dict[int, Dict[str, int]] = defaultdict(lambda: {"total": 0, "exact_match": 0})
+    known_hop_count = 0
     for traj, result in zip(test_traj, oracle_test):
+        raw_gt_hop = traj.get("gt_hop_count", -1)
+        try:
+            gt_hop = int(raw_gt_hop)
+        except (TypeError, ValueError):
+            gt_hop = -1
+        if gt_hop > 0:
+            known_hop_count += 1
+            hop_alignment_counter[gt_hop]["total"] += 1
+            if int(result["steps_used"]) == gt_hop:
+                hop_alignment_counter[gt_hop]["exact_match"] += 1
         label_rows.append(
             {
                 "id": traj["id"],
+                "gt_hop_count": gt_hop,
                 "oracle_steps_used": result["steps_used"],
                 "oracle_f1": result["f1"],
                 "oracle_em": result["em"],
+                "step_targets": result["step_targets"],
             }
         )
     _write_jsonl(label_path, label_rows)
 
+    per_hop_alignment = []
+    total_exact_match = 0
+    for hop in sorted(hop_alignment_counter.keys()):
+        total = hop_alignment_counter[hop]["total"]
+        exact = hop_alignment_counter[hop]["exact_match"]
+        total_exact_match += exact
+        per_hop_alignment.append(
+            {
+                "gt_hop_count": int(hop),
+                "total": int(total),
+                "exact_match": int(exact),
+                "exact_match_rate": float(exact / total) if total > 0 else 0.0,
+            }
+        )
+    hop_alignment = {
+        "known_gt_count": int(known_hop_count),
+        "unknown_gt_count": int(max(0, len(test_traj) - known_hop_count)),
+        "exact_match_rate_over_known": float(total_exact_match / known_hop_count) if known_hop_count > 0 else 0.0,
+        "per_hop": per_hop_alignment,
+    }
+
     return {
-        "reservation_values": reservation_values,
+        "reservation_values": global_reservation_values,
         "oracle_test": oracle_test,
         "oracle_dev": oracle_dev,
         "pareto_path": str(pareto_path),
         "label_path": str(label_path),
+        "hop_alignment": hop_alignment,
         "table": rows,
     }
 
@@ -567,6 +891,30 @@ def build_stage1_report(cfg: Stage1Config, datasets: Sequence[str], metrics: Dic
     for ds in datasets:
         report_lines.append(f"- `{ds}` pareto: `{metrics[ds]['pareto_path']}`")
     report_lines.append("")
+    report_lines.append("## Hop Alignment (Oracle Step vs GT Hop)")
+    report_lines.append("")
+    for ds in datasets:
+        m = metrics[ds]
+        hop_info = m.get("hop_alignment", {})
+        known_gt = int(hop_info.get("known_gt_count", 0))
+        unknown_gt = int(hop_info.get("unknown_gt_count", 0))
+        exact_rate = float(hop_info.get("exact_match_rate_over_known", 0.0))
+        if known_gt <= 0:
+            report_lines.append(f"- `{ds}`: known_gt=0, unknown_gt={unknown_gt} (缺少可用 hop 标签)")
+            continue
+        per_hop = hop_info.get("per_hop", [])
+        details = []
+        for item in per_hop:
+            hop = int(item.get("gt_hop_count", -1))
+            exact = int(item.get("exact_match", 0))
+            total = int(item.get("total", 0))
+            rate = float(item.get("exact_match_rate", 0.0))
+            details.append(f"{hop}-hop {exact}/{total} ({rate:.2%})")
+        details_text = "; ".join(details) if details else "no per-hop breakdown"
+        report_lines.append(
+            f"- `{ds}`: known_gt={known_gt}, unknown_gt={unknown_gt}, exact_match_over_known={exact_rate:.2%}; {details_text}"
+        )
+    report_lines.append("")
     report_lines.append("## Go/No-Go Checks")
     report_lines.append("")
     gate_msgs = []
@@ -613,18 +961,35 @@ def _scan_feature_files(path: Path) -> Tuple[int, int]:
     return len(files), bad
 
 
-def run_dataset_stage1(cfg: Stage1Config, dataset_name: str, skip_prepare: bool) -> Dict[str, Any]:
+def run_dataset_stage1(
+    cfg: Stage1Config,
+    dataset_name: str,
+    skip_prepare: bool,
+    skip_trajectories: bool,
+    hidden_state_extractor: HiddenStateExtractor,
+) -> Dict[str, Any]:
     if not skip_prepare:
         counts = prepare_data(cfg, dataset_name)
     else:
+        _validate_skip_prepare_inputs(cfg, dataset_name)
         counts = {}
         for split in ["train", "dev", "test"]:
             p = cfg.data_processed_dir / dataset_name / f"{split}.jsonl"
             counts[split] = len(_read_jsonl(p)) if p.exists() else 0
 
-    cached_counts = {}
-    for split in ["train", "dev", "test"]:
-        cached_counts[split] = collect_trajectories(cfg, dataset_name, split)
+    cached_counts: Dict[str, int] = {}
+    if skip_trajectories:
+        for split in ["train", "dev", "test"]:
+            traj_path = cfg.trajectories_dir / dataset_name / split / "trajectories.jsonl"
+            if not traj_path.exists():
+                raise FileNotFoundError(
+                    f"--skip-trajectories 已开启但缺少轨迹文件：{traj_path}。"
+                    "请先对该 split 跑过轨迹收集，或去掉该标志。"
+                )
+            cached_counts[split] = len(_read_jsonl(traj_path))
+    else:
+        for split in ["train", "dev", "test"]:
+            cached_counts[split] = collect_trajectories(cfg, dataset_name, split, hidden_state_extractor)
 
     oracle_info = compute_oracle_and_pareto(cfg, dataset_name)
 
@@ -658,6 +1023,7 @@ def run_dataset_stage1(cfg: Stage1Config, dataset_name: str, skip_prepare: bool)
         "key_feature_missing_rate": key_missing_rate,
         "oracle_gain_over_best_fixed": oracle_gain,
         "pareto_path": oracle_info["pareto_path"],
+        "hop_alignment": oracle_info["hop_alignment"],
     }
 
 
@@ -677,14 +1043,37 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--n-samples", type=int, default=10)
     parser.add_argument("--cost-per-step", type=float, default=0.05)
+    parser.add_argument(
+        "--oracle-cost-metric",
+        type=str,
+        choices=("fixed", "token", "latency"),
+        default="fixed",
+        help="Oracle DP 与 Pareto 横轴用的步级成本：fixed=每步常数；token/latency=按轨迹缓存归一化",
+    )
     parser.add_argument("--embed-dim", type=int, default=256)
+    parser.add_argument(
+        "--hidden-state-model",
+        type=str,
+        default="",
+        help="用于提取真实 hidden states 的本地目录或 Hugging Face 模型名（默认优先 models/Meta-Llama-3.1-8B-Instruct）",
+    )
+    parser.add_argument(
+        "--hidden-state-max-length",
+        type=int,
+        default=2048,
+        help="提取 hidden states 时的最大 token 长度（超长会截断）",
+    )
     parser.add_argument("--skip-prepare", action="store_true")
+    parser.add_argument(
+        "--skip-trajectories",
+        action="store_true",
+        help="不调用 LLM 重算轨迹与 hidden states，直接读 cache/trajectories 与 cache/features（用于只重跑部分数据集后合并报告）",
+    )
     parser.add_argument("--root-dir", type=str, default=".")
     return parser.parse_args()
 
 
 def main() -> None:
-    load_dotenv()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     args = parse_args()
     datasets = [x.strip().lower() for x in args.datasets.split(",") if x.strip()]
@@ -702,15 +1091,25 @@ def main() -> None:
         temperature=args.temperature,
         n_samples=args.n_samples,
         cost_per_step=args.cost_per_step,
+        oracle_cost_metric=args.oracle_cost_metric,
         embed_dim=args.embed_dim,
+        hidden_state_model=args.hidden_state_model,
+        hidden_state_max_length=args.hidden_state_max_length,
         root_dir=Path(args.root_dir),
     )
     _ensure_dirs(cfg)
+    hidden_state_extractor = HiddenStateExtractor(cfg)
 
     all_metrics: Dict[str, Dict[str, Any]] = {}
     for ds in datasets:
         LOGGER.info("===== Stage1 dataset: %s =====", ds)
-        all_metrics[ds] = run_dataset_stage1(cfg, ds, skip_prepare=args.skip_prepare)
+        all_metrics[ds] = run_dataset_stage1(
+            cfg,
+            ds,
+            skip_prepare=args.skip_prepare,
+            skip_trajectories=args.skip_trajectories,
+            hidden_state_extractor=hidden_state_extractor,
+        )
 
     report_path = build_stage1_report(cfg, datasets, all_metrics)
     LOGGER.info("Stage1 complete. Report: %s", report_path)

@@ -39,14 +39,24 @@ $$
 $$
 c_k = \int_{r_k^*}^{\infty} (x - r_k^*) dF_k(x) 
 $$
-**Oracle 最优停止规则**：如果当前生成答案的预期质量 $Q(s_k) \geq r_{k+1}^*$，则**停止检索**；否则**继续检索**。
+**全局（静态）Weitzman 基线**：在训练集上估计每步增益的经验分布，解出**与 query 无关**的全局阈值 $\{r_k^*\}$，在测试时一律用 $Q(s_k)$ 与 $r_{k+1}^*$ 比较。这是分布已知但**非上下文**的近似，用于对照说明 contextual 停止的必要性。
+
+**实例级 Oracle（Stage 1 主线上界）**：对**单条轨迹**在已知全程真实质量 $Q(s_k)$（如 F1）下，用后向归纳定义最优价值；每步成本 $c_k$ 可与理论形式 $\,Q(s_\tau) - \sum_{j=1}^{\tau} c_j\,$ 对齐——默认取常数 $c_k \equiv c$，也可按轨迹缓存的 `token_count` 或 `latency_ms` 归一化为随步递增的成本（见 `stage1.run_stage1 --oracle-cost-metric`）：
+$$
+V_K^i = Q(s_K^i), \quad V_k^i = \max\bigl(Q(s_k^i),\; V_{k+1}^i - c_{k+1}\bigr).
+$$
+在**最小**的 $k$ 满足 $Q(s_k^i) \geq V_{k+1}^i - c_{k+1}$ 时停止（否则在第 $K$ 步停止）。这对应上帝视角下**完美的上下文保留值**（未来收益被精确预知），作为 Pareto 前沿的理论天花板。**缺失步**（轨迹未观测到的 $k$）上 $Q$ 沿用上一观测 F1，成本记为基准 $c$，表示“空转一步”仍消耗资源。
+
+写入 `artifacts/oracle/{dataset}/test_oracle_labels.jsonl` 的 `step_targets[k]` 为字典，除 `expected_continue_val`（即 $V_{k+1}^i - c_{k+1}$）外，还提供 `margin`（等于 `expected_continue_val` 与当前 $Q_k$ 之差）与 `action_label`（1=Continue，0=Stop）供 Phase 2 做回归或二分类。
 
 ### 4. 核心创新 1：Neural Reservation Value (神经保留值)
-由于实际中真实分布 $F_k$ 未知，我们提出用 LLM 的内部隐藏状态（Hidden States）通过一个轻量级探针（Probe）直接预测保留值：
+由于实际中真实分布 $F_k$ 未知，我们提出用 LLM 的内部隐藏状态（Hidden States）通过一个轻量级探针（Probe）直接**逼近实例级继续价值或边际**（由 Stage 1 的 DP Oracle 写入 `test_oracle_labels.jsonl` 的 `step_targets[k]`：`expected_continue_val` $= V_{k+1}^i - c_{k+1}$，`margin` $= (V_{k+1}^i - c_{k+1}) - Q_k$）：
 $$
-\hat{r}_{k+1} = f_\theta(h_k)
+\hat{y}_k = f_\theta(h_k) \approx V_{k+1}^i - c_{k+1}
+\quad\text{或}\quad
+\widehat{\Delta r}_k \approx \mathrm{margin}_k
 $$
-其中 $h_k$ 是 LLM 处理当前状态 $s_k$ 时的最后一层隐藏状态或 Semantic Entropy（语义熵）。
+其中 $h_k$ 是 LLM 处理当前状态 $s_k$ 时的最后一层隐藏状态或 Semantic Entropy（语义熵）。停止规则将 $\hat{y}_k$ 与当前 $Q(s_k)$ 比较（或与 `margin` 符号一致的二分类头），与 Oracle 的阈值结构同型，但阈值随上下文变化。
 
 ### 5. 核心创新 2：E-value Anytime-Valid 风险控制
 由于停止时刻 $\tau$ 是依赖于数据的随机变量，标准共形预测的覆盖率保障会失效。我们使用基于 E-value 的序列测试（Testing by Betting）：
@@ -74,12 +84,13 @@ $$
 
 #### Phase 1: 数据收集与 Oracle 验证 (可行性验证)
 *   **操作**：在训练集上，强制执行完整的 $K$ 步检索（设 $K=5$）。记录每一步的文档 $d_k$、答案质量 $Q(s_k)$ 以及对应的 LLM 隐藏状态 $h_k$。
-*   **Oracle 计算**：根据训练集统计的真实后验信息增益分布，反向算出真实的 Weitzman 保留值 $r_k^*$。
-*   **实验**：使用 $r_k^*$ 作为停止规则，评估 Oracle Pandora-RAG 的表现（验证 Pandora's Box 框架的理论上界）。
+*   **Oracle 计算（主线上界）**：对每条轨迹用已知 $Q(s_k)$ 与步级成本 $c_k$ 做**后向归纳 DP**，得到实例最优停止步与逐步标签 `step_targets`（含 $V_{k+1}-c_{k+1}$、`margin`、`action_label`），并写入 `artifacts/oracle/{dataset}/test_oracle_labels.jsonl`。CLI：`--oracle-cost-metric {fixed,token,latency}`；非 `fixed` 时 Stage1 Pareto 横轴为平均累计归一化成本。
+*   **全局 Weitzman 基线**：仍在训练集上估计每步增益分布并解全局 $r_k^*$，在 Pareto 图中以 **Global-Weitzman** 点与 **Oracle（DP）** 对比，体现「静态阈值 vs 上下文 Oracle」的差距。
+*   **实验**：以 DP Oracle 为天花板绘制 Stage1 Pareto；可选分析 Global-Weitzman 作为非 Oracle 的对照。
 
 #### Phase 2: Neural Probe 训练 (核心算法实现)
-*   **网络结构**：基于收集到的 $(h_k, r_k^*)$ 数据对，训练一个小型 MLP $f_\theta$ 作为探针。
-*   **损失函数**：最小化逼近误差 $\mathcal{L}(\theta) = \mathbb{E}[(\hat{r}_k - r_k^*)^2]$。
+*   **网络结构**：基于 $(h_k, y_k)$ 数据对训练小型 MLP $f_\theta$，其中 $y_k$ 来自 Phase 1 的 `step_targets`（优先 `expected_continue_val` 或 `margin`），而非全局常数 $r_{k+1}^*$；回归困难时可改用 `action_label` 做二分类。
+*   **损失函数**：最小化 $\mathcal{L}(\theta) = \mathbb{E}[(\hat{y}_k - y_k)^2]$（或与停止决策一致的替代损失）。
 *   **测试**：分析探针的预测误差 $\epsilon$，并在验证集上测试仅依赖探针的停止策略效率。
 
 #### Phase 3: E-value 风险控制集成
@@ -110,7 +121,8 @@ $$
 *   **Conformal-RAG** *(arXiv 2025.06)*：虽用于检索后过滤（Post-retrieval filtering），但可作为基于共形预测的质量控制基准对比。
 
 ### 4. 消融实验基线 (Ablations)
-*   **Oracle-Pandora-RAG**：使用真实保留值（展示性能天花板）。
+*   **Oracle-Pandora-RAG**：使用 DP 给出的实例级继续价值 / 最优停止（展示性能天花板）。
+*   **Global-Weitzman**：使用训练集估计的全局 $r_k^*$ 阈值（静态策略，非 Oracle）。
 *   **Pandora-RAG w/o E-value**：移除 E-value 校准，退化为纯启发式停止。
 *   **Pandora-RAG w/ Standard CP**：替换 E-value 为标准的共形预测（展示标准 CP 在自适应停止下的失效）。
 
