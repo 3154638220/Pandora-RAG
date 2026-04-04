@@ -6,7 +6,9 @@ LLM 调用客户端。
 """
 import logging
 import math
-from typing import Dict, Optional
+import random
+import time
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -113,6 +115,95 @@ class LLMClient:
         except Exception as e:
             logger.error("LLM 调用失败：%s，降级为 mock。", e)
             return self._mock_generate(context)
+
+    def generate_n(
+        self,
+        question: str,
+        context: str,
+        n: int,
+        temperature: float,
+    ) -> Tuple[List[str], Dict[str, float]]:
+        """
+        单次请求生成 n 个完成（Pass 1 语义熵 / 自一致性），与 Stage1 的 temperature、n 对齐。
+        返回 (answers, meta)，meta 含 token_count（近似每完成一次）、latency_ms。
+        """
+        prompt = ANSWER_PROMPT.format(question=question, context=context)
+        n = max(1, int(n))
+        t0 = time.perf_counter()
+
+        if self._mock:
+            base = self._mock_generate(context)["answer"]
+            rng = random.Random(hash(context) & 0xFFFFFFFF)
+            out: List[str] = []
+            parts = base.split()
+            for _ in range(n):
+                if len(parts) <= 2:
+                    out.append(base)
+                else:
+                    k = max(1, int(len(parts) * rng.uniform(0.6, 1.0)))
+                    shuffled = parts[:]
+                    rng.shuffle(shuffled)
+                    out.append(" ".join(shuffled[:k]))
+            lat = (time.perf_counter() - t0) * 1000.0
+            tc = max(1, sum(len(a.split()) for a in out) // n)
+            return out, {"token_count": float(tc), "latency_ms": lat}
+
+        try:
+            kwargs = dict(
+                model=self.cfg.model_name,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=self.cfg.max_tokens,
+                temperature=float(temperature),
+                n=n,
+            )
+            try:
+                response = self._client.chat.completions.create(**kwargs)
+            except Exception as e_inner:
+                logger.warning(
+                    "批量 n=%d 请求失败（%s），改为逐条采样。",
+                    n,
+                    e_inner,
+                )
+                texts: List[str] = []
+                tok_sum = 0
+                for _ in range(n):
+                    one = self._client.chat.completions.create(
+                        model=self.cfg.model_name,
+                        messages=[{"role": "user", "content": prompt}],
+                        max_tokens=self.cfg.max_tokens,
+                        temperature=float(temperature),
+                    )
+                    texts.append((one.choices[0].message.content or "").strip())
+                    u = getattr(one, "usage", None)
+                    if u is not None and getattr(u, "completion_tokens", None):
+                        tok_sum += int(u.completion_tokens)
+                lat = (time.perf_counter() - t0) * 1000.0
+                tc = tok_sum / max(1, n) if tok_sum else float(len(texts[0].split()) if texts else 1)
+                return texts, {"token_count": tc, "latency_ms": lat}
+
+            texts = [(c.message.content or "").strip() for c in response.choices]
+            u = getattr(response, "usage", None)
+            ct = int(getattr(u, "completion_tokens", 0) or 0) if u is not None else 0
+            tc = (ct / float(n)) if ct > 0 else float(len(texts[0].split()) if texts else 1)
+            lat = (time.perf_counter() - t0) * 1000.0
+            return texts, {"token_count": tc, "latency_ms": lat}
+        except Exception as e:
+            logger.error("generate_n 失败：%s，降级为 mock。", e)
+            base = self._mock_generate(context)["answer"]
+            rng = random.Random(42)
+            parts = base.split()
+            out: List[str] = []
+            for _ in range(n):
+                if len(parts) <= 2:
+                    out.append(base)
+                else:
+                    k = max(1, int(len(parts) * rng.uniform(0.6, 1.0)))
+                    shuffled = parts[:]
+                    rng.shuffle(shuffled)
+                    out.append(" ".join(shuffled[:k]))
+            lat = (time.perf_counter() - t0) * 1000.0
+            tc = max(1, sum(len(a.split()) for a in out) // n)
+            return out, {"token_count": float(tc), "latency_ms": lat}
 
     # ──────────────────────────────────────────────────────────
     @staticmethod

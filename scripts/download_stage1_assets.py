@@ -26,7 +26,8 @@ import sys
 from pathlib import Path
 
 # 与 stage1.run_stage1 保持一致
-# Hotpot distractor 与 MuSiQue 在 Hub 上仅提供 train/validation；test 由 prepare_data 从 validation 切分。
+# Hotpot distractor 与 MuSiQue 在 Hub 上仅提供 train/validation；test 由 prepare_data 从 validation 尾部切分；
+# Calib+Dev 从剩余 validation 池中 seed 打乱后各取 1000，与 Test 的 id 正交。
 HF_SPECS = {
     "hotpotqa": ("hotpot_qa", "distractor", ("train", "validation")),
     "musique": ("dgslibisey/MuSiQue", None, ("train", "validation")),

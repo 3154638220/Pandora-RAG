@@ -9,6 +9,9 @@ Covers:
 
 Usage:
   python -m stage1.run_stage1 --datasets hotpotqa,musique,2wiki --max-k 5
+
+数据划分默认 Train=4000 / Calib=1000 / Dev=1000 / Test=1000；NLI 默认 CPU（NLI_DEVICE）。
+权重可放任意盘：设 NLI_MODEL_DIR 指向本地下载目录（如 models/cross-encoder-nli-deberta-v3-small）即离线加载。
 """
 
 from __future__ import annotations
@@ -73,7 +76,8 @@ LOGGER = logging.getLogger(__name__)
 class Stage1Config:
     seed: int = 42
     max_k: int = 5
-    train_quota: int = 5000
+    train_quota: int = 4000
+    calib_quota: int = 1000
     dev_quota: int = 1000
     test_quota: int = 1000
     temperature: float = 0.7
@@ -152,6 +156,71 @@ def _heuristic_nli(question: str, context: str) -> Tuple[float, float]:
     entail = min(1.0, overlap * 1.2)
     contra = max(0.0, 0.3 - overlap * 0.5)
     return float(entail), float(contra)
+
+
+class NLICrossEncoderScorer:
+    """cross-encoder/nli-deberta-v3-small：文档 vs 问题+历史上下文（experiments.md B2）。"""
+
+    DEFAULT_HUB_ID = "cross-encoder/nli-deberta-v3-small"
+
+    def __init__(self, device: str = "cpu", model_id: Optional[str] = None) -> None:
+        self._device = device
+        env_id = (os.getenv("NLI_MODEL_DIR") or "").strip()
+        self.model_id = (model_id or env_id or self.DEFAULT_HUB_ID).strip()
+        self._tokenizer = None
+        self._model = None
+        self._ent_idx: Optional[int] = None
+        self._con_idx: Optional[int] = None
+
+    def _lazy_init(self) -> None:
+        if self._model is not None:
+            return
+        import torch
+        from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+        self._tokenizer = AutoTokenizer.from_pretrained(self.model_id)
+        self._model = AutoModelForSequenceClassification.from_pretrained(self.model_id)
+        self._model.to(self._device)
+        self._model.eval()
+        id2l = getattr(self._model.config, "id2label", None) or {}
+        for idx, lab in id2l.items():
+            low = str(lab).lower()
+            if "entail" in low:
+                self._ent_idx = int(idx)
+            if "contrad" in low:
+                self._con_idx = int(idx)
+        if self._ent_idx is None:
+            self._ent_idx = 1
+        if self._con_idx is None:
+            self._con_idx = 0
+        LOGGER.info("NLI CrossEncoder 已加载: %s (%s)", self.model_id, self._device)
+
+    def entail_contra(self, premise: str, hypothesis: str) -> Tuple[float, float]:
+        if not _normalize_text(premise) or not _normalize_text(hypothesis):
+            return 0.0, 0.0
+        try:
+            self._lazy_init()
+            import torch
+            import torch.nn.functional as F
+
+            batch = self._tokenizer(
+                premise,
+                hypothesis,
+                return_tensors="pt",
+                truncation=True,
+                max_length=256,
+                padding=True,
+            )
+            batch = {k: v.to(self._device) for k, v in batch.items()}
+            with torch.no_grad():
+                logits = self._model(**batch).logits
+                probs = F.softmax(logits, dim=-1)[0]
+            ent = float(probs[self._ent_idx].item())
+            con = float(probs[self._con_idx].item()) if self._con_idx is not None else 0.0
+            return ent, con
+        except Exception as exc:
+            LOGGER.warning("NLI 推理失败，回退启发式：%s", exc)
+            return _heuristic_nli(hypothesis, premise)
 
 
 def _resolve_hidden_state_device(torch_module: Any) -> str:
@@ -288,22 +357,6 @@ class HiddenStateExtractor:
             last_token.detach().cpu().to(self._torch.float16).numpy(),
             mean_pool.detach().cpu().to(self._torch.float16).numpy(),
         )
-
-
-def _sample_answers(base_answer: str, n: int, rng: random.Random) -> List[str]:
-    if not base_answer:
-        return ["" for _ in range(n)]
-    parts = base_answer.split()
-    sampled = []
-    for _ in range(n):
-        if len(parts) <= 2:
-            sampled.append(base_answer)
-            continue
-        k = max(1, int(len(parts) * rng.uniform(0.6, 1.0)))
-        shuffled = parts[:]
-        rng.shuffle(shuffled)
-        sampled.append(" ".join(shuffled[:k]))
-    return sampled
 
 
 def _semantic_entropy_and_consistency(samples: Sequence[str]) -> Tuple[float, float]:
@@ -444,6 +497,7 @@ def _prepared_manifest_path(cfg: Stage1Config, dataset_name: str) -> Path:
 def _missing_prepared_artifacts(cfg: Stage1Config, dataset_name: str) -> List[Path]:
     required: List[Path] = [
         cfg.data_processed_dir / dataset_name / "train.jsonl",
+        cfg.data_processed_dir / dataset_name / "calib.jsonl",
         cfg.data_processed_dir / dataset_name / "dev.jsonl",
         cfg.data_processed_dir / dataset_name / "test.jsonl",
         _prepared_manifest_path(cfg, dataset_name),
@@ -482,6 +536,10 @@ def _load_hf_split(dataset_name: str, split_name: str) -> Optional[Dataset]:
 
 
 def prepare_data(cfg: Stage1Config, dataset_name: str) -> Dict[str, int]:
+    """
+    按 experiments.md：Train/Calib/Dev/Test 四切分，id 互不重叠；Calib+Dev 均从同一条 validation
+    池中用 seed 打乱后顺序切出，专用于后续 E-value / CP 校准（严禁与 Test 重叠）。
+    """
     rng = random.Random(cfg.seed)
     train_raw = _load_hf_split(dataset_name, "train")
     val_raw = _load_hf_split(dataset_name, "validation")
@@ -505,13 +563,44 @@ def prepare_data(cfg: Stage1Config, dataset_name: str) -> Dict[str, int]:
         test_list = val_list[-cut:]
         val_list = val_list[:-cut]
 
-    split_map = {
-        "train": train_list,
-        "dev": val_list,
-        "test": test_list,
+    need_val = cfg.calib_quota + cfg.dev_quota
+    if len(val_list) < need_val:
+        raise RuntimeError(
+            f"{dataset_name}: validation 池不足以划分 Calib+Dev（需 {need_val} 条互不重复样本，"
+            f"当前 validation 剩余 {len(val_list)} 条）。"
+        )
+
+    val_order = list(range(len(val_list)))
+    rng.shuffle(val_order)
+    calib_pick = sorted(val_order[: cfg.calib_quota])
+    dev_pick = sorted(val_order[cfg.calib_quota : need_val])
+
+    calib_rows = [
+        _normalize_record(val_list[i], dataset_name, "calib", j) for j, i in enumerate(calib_pick)
+    ]
+    dev_rows = [
+        _normalize_record(val_list[i], dataset_name, "dev", j) for j, i in enumerate(dev_pick)
+    ]
+
+    train_idx = _sample_indices(len(train_list), cfg.train_quota, rng)
+    train_rows = [
+        _normalize_record(train_list[i], dataset_name, "train", j) for j, i in enumerate(train_idx)
+    ]
+
+    test_idx = _sample_indices(len(test_list), cfg.test_quota, rng)
+    test_rows = [
+        _normalize_record(test_list[i], dataset_name, "test", j) for j, i in enumerate(test_idx)
+    ]
+
+    splits_out: Dict[str, List[Dict[str, Any]]] = {
+        "train": train_rows,
+        "calib": calib_rows,
+        "dev": dev_rows,
+        "test": test_rows,
     }
     quotas = {
         "train": cfg.train_quota,
+        "calib": cfg.calib_quota,
         "dev": cfg.dev_quota,
         "test": cfg.test_quota,
     }
@@ -525,11 +614,7 @@ def prepare_data(cfg: Stage1Config, dataset_name: str) -> Dict[str, int]:
         "timestamp": int(time.time()),
     }
 
-    for split, rows in split_map.items():
-        selected_idx = _sample_indices(len(rows), quotas[split], rng)
-        normalized: List[Dict[str, Any]] = []
-        for local_idx, src_idx in enumerate(selected_idx):
-            normalized.append(_normalize_record(rows[src_idx], dataset_name, split, local_idx))
+    for split, normalized in splits_out.items():
         out_path = cfg.data_processed_dir / dataset_name / f"{split}.jsonl"
         _write_jsonl(out_path, normalized)
         manifest["selected_ids"][split] = [r["id"] for r in normalized]
@@ -558,6 +643,7 @@ def collect_trajectories(
     dataset_name: str,
     split: str,
     hidden_state_extractor: HiddenStateExtractor,
+    nli_scorer: NLICrossEncoderScorer,
 ) -> int:
     in_path = cfg.data_processed_dir / dataset_name / f"{split}.jsonl"
     if not in_path.exists():
@@ -568,9 +654,8 @@ def collect_trajectories(
     llm_cfg.api_key = os.getenv("OPENAI_API_KEY", "EMPTY")
     llm_cfg.model_name = os.getenv("LLM_MODEL", DEFAULT_LLM_MODEL)
     llm_cfg.max_tokens = 150
-    llm_cfg.temperature = 0.0
+    llm_cfg.temperature = float(cfg.temperature)
     llm = LLMClient(llm_cfg)
-    rng = random.Random(cfg.seed + len(rows))
 
     out_path = cfg.trajectories_dir / dataset_name / split / "trajectories.jsonl"
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -591,20 +676,30 @@ def collect_trajectories(
 
             for k in range(1, cfg.max_k + 1):
                 doc, score, doc_idx = _retrieve_step_docs(q, current_answer, docs_pool, used)
+                acc_before_doc = acc_context
                 if doc_idx >= 0:
                     used.append(doc_idx)
                     hist_docs.append(doc)
                 if doc:
                     acc_context = (acc_context + "\n\n" + doc).strip()
 
-                result = llm.generate(q, acc_context)
-                current_answer = _normalize_text(result.get("answer", ""))
+                samples, gen_meta = llm.generate_n(
+                    q, acc_context, cfg.n_samples, cfg.temperature
+                )
+                current_answer = _normalize_text(samples[0]) if samples else ""
                 f1, em = compute_metrics(current_answer, gold)
 
-                samples = _sample_answers(current_answer, cfg.n_samples, rng)
                 semantic_entropy, self_consistency = _semantic_entropy_and_consistency(samples)
                 overlap = _jaccard(doc, " ".join(hist_docs[:-1])) if len(hist_docs) > 1 else 0.0
-                nli_entail, nli_contra = _heuristic_nli(q, doc)
+                hyp_piece = f"{q} {acc_before_doc}".strip()
+                if len(hyp_piece) > 512:
+                    hyp_piece = hyp_piece[:512]
+                nli_entail, nli_contra = (
+                    nli_scorer.entail_contra(doc, hyp_piece) if doc else (0.0, 0.0)
+                )
+
+                tok = int(round(float(gen_meta.get("token_count", 0))))
+                lat_ms = float(gen_meta.get("latency_ms", 0.0))
 
                 steps.append(
                     {
@@ -615,9 +710,9 @@ def collect_trajectories(
                         "f1": round(float(f1), 4),
                         "em": bool(em),
                         "cost": {
-                            "token_count": int(result.get("token_count", 0)),
-                            "retrieval_calls": k,
-                            "latency_ms": 0,
+                            "token_count": max(1, tok),
+                            "retrieval_calls": 1,
+                            "latency_ms": round(lat_ms, 3),
                         },
                         "semantic_entropy": round(semantic_entropy, 6),
                         "self_consistency": round(self_consistency, 6),
@@ -656,6 +751,25 @@ def collect_trajectories(
 
 def _load_trajectory_jsonl(path: Path) -> List[Dict[str, Any]]:
     return _read_jsonl(path)
+
+
+def _pareto_nondominated_min_cost_max_f1(
+    points: Sequence[Tuple[float, float]],
+) -> List[Tuple[float, float]]:
+    """横轴为 cost（越小越好）、纵轴为 F1（越大越好）时的非支配点集，用于包络折线。"""
+    pts = [(float(a), float(b)) for a, b in points]
+    nd: List[Tuple[float, float]] = []
+    for i, (cx, fy) in enumerate(pts):
+        dominated = False
+        for j, (ox, oy) in enumerate(pts):
+            if i == j:
+                continue
+            if (ox <= cx and oy >= fy) and (ox < cx or oy > fy):
+                dominated = True
+                break
+        if not dominated:
+            nd.append((cx, fy))
+    return sorted(nd, key=lambda t: (t[0], -t[1]))
 
 
 def compute_oracle_and_pareto(cfg: Stage1Config, dataset_name: str) -> Dict[str, Any]:
@@ -750,6 +864,7 @@ def compute_oracle_and_pareto(cfg: Stage1Config, dataset_name: str) -> Dict[str,
     use_cost_x = cfg.oracle_cost_metric != "fixed"
     x_key = "avg_cost" if use_cost_x else "avg_steps"
     fig, ax = plt.subplots(1, 1, figsize=(7.5, 5))
+    scatter_xy: List[Tuple[float, float]] = []
     for _, row in df.iterrows():
         strat = row["strategy"]
         if strat == "Oracle":
@@ -759,6 +874,7 @@ def compute_oracle_and_pareto(cfg: Stage1Config, dataset_name: str) -> Dict[str,
         else:
             color, marker, size = "#1f77b4", "o", 90
         x_val = float(row[x_key])
+        scatter_xy.append((x_val, float(row["avg_f1"])))
         ax.scatter(
             x_val,
             row["avg_f1"],
@@ -768,6 +884,17 @@ def compute_oracle_and_pareto(cfg: Stage1Config, dataset_name: str) -> Dict[str,
             label=row["strategy"],
         )
         ax.annotate(row["strategy"], (x_val, row["avg_f1"]), fontsize=8)
+    nd = _pareto_nondominated_min_cost_max_f1(scatter_xy)
+    if len(nd) >= 2:
+        ax.plot(
+            [p[0] for p in nd],
+            [p[1] for p in nd],
+            color="#333333",
+            linestyle="--",
+            linewidth=1.2,
+            alpha=0.85,
+            label="Pareto envelope",
+        )
     ax.set_xlabel(
         "Avg cumulative cost (normalized)"
         if use_cost_x
@@ -801,13 +928,23 @@ def compute_oracle_and_pareto(cfg: Stage1Config, dataset_name: str) -> Dict[str,
             hop_alignment_counter[gt_hop]["total"] += 1
             if int(result["steps_used"]) == gt_hop:
                 hop_alignment_counter[gt_hop]["exact_match"] += 1
+        tau = int(result["steps_used"])
+        targets = result["step_targets"] or {}
+        if tau >= cfg.max_k:
+            td = targets.get(cfg.max_k - 1, {})
+        else:
+            td = targets.get(tau, {})
         label_rows.append(
             {
                 "id": traj["id"],
                 "gt_hop_count": gt_hop,
+                "oracle_stop_step": tau,
                 "oracle_steps_used": result["steps_used"],
                 "oracle_f1": result["f1"],
                 "oracle_em": result["em"],
+                "margin": float(td.get("margin", 0.0)),
+                "action_label": int(td.get("action_label", 0)),
+                "expected_continue_val": float(td.get("expected_continue_val", 0.0)),
                 "step_targets": result["step_targets"],
             }
         )
@@ -867,7 +1004,8 @@ def build_stage1_report(cfg: Stage1Config, datasets: Sequence[str], metrics: Dic
     for ds in datasets:
         m = metrics[ds]
         report_lines.append(
-            f"- `{ds}`: train={m['counts'].get('train', 0)}, dev={m['counts'].get('dev', 0)}, test={m['counts'].get('test', 0)}"
+            f"- `{ds}`: train={m['counts'].get('train', 0)}, calib={m['counts'].get('calib', 0)}, "
+            f"dev={m['counts'].get('dev', 0)}, test={m['counts'].get('test', 0)}"
         )
     report_lines.append("")
     report_lines.append("## Cache Integrity")
@@ -922,6 +1060,7 @@ def build_stage1_report(cfg: Stage1Config, datasets: Sequence[str], metrics: Dic
         m = metrics[ds]
         cache_complete = (
             m["counts"].get("train", 0) > 0
+            and m["counts"].get("calib", 0) > 0
             and m["counts"].get("dev", 0) > 0
             and m["counts"].get("test", 0) > 0
         )
@@ -967,19 +1106,20 @@ def run_dataset_stage1(
     skip_prepare: bool,
     skip_trajectories: bool,
     hidden_state_extractor: HiddenStateExtractor,
+    nli_scorer: NLICrossEncoderScorer,
 ) -> Dict[str, Any]:
     if not skip_prepare:
         counts = prepare_data(cfg, dataset_name)
     else:
         _validate_skip_prepare_inputs(cfg, dataset_name)
         counts = {}
-        for split in ["train", "dev", "test"]:
+        for split in ["train", "calib", "dev", "test"]:
             p = cfg.data_processed_dir / dataset_name / f"{split}.jsonl"
             counts[split] = len(_read_jsonl(p)) if p.exists() else 0
 
     cached_counts: Dict[str, int] = {}
     if skip_trajectories:
-        for split in ["train", "dev", "test"]:
+        for split in ["train", "calib", "dev", "test"]:
             traj_path = cfg.trajectories_dir / dataset_name / split / "trajectories.jsonl"
             if not traj_path.exists():
                 raise FileNotFoundError(
@@ -988,8 +1128,10 @@ def run_dataset_stage1(
                 )
             cached_counts[split] = len(_read_jsonl(traj_path))
     else:
-        for split in ["train", "dev", "test"]:
-            cached_counts[split] = collect_trajectories(cfg, dataset_name, split, hidden_state_extractor)
+        for split in ["train", "calib", "dev", "test"]:
+            cached_counts[split] = collect_trajectories(
+                cfg, dataset_name, split, hidden_state_extractor, nli_scorer
+            )
 
     oracle_info = compute_oracle_and_pareto(cfg, dataset_name)
 
@@ -1037,7 +1179,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-k", type=int, default=5)
-    parser.add_argument("--train-quota", type=int, default=5000)
+    parser.add_argument("--train-quota", type=int, default=4000)
+    parser.add_argument("--calib-quota", type=int, default=1000)
     parser.add_argument("--dev-quota", type=int, default=1000)
     parser.add_argument("--test-quota", type=int, default=1000)
     parser.add_argument("--temperature", type=float, default=0.7)
@@ -1086,6 +1229,7 @@ def main() -> None:
         seed=args.seed,
         max_k=args.max_k,
         train_quota=args.train_quota,
+        calib_quota=args.calib_quota,
         dev_quota=args.dev_quota,
         test_quota=args.test_quota,
         temperature=args.temperature,
@@ -1099,6 +1243,10 @@ def main() -> None:
     )
     _ensure_dirs(cfg)
     hidden_state_extractor = HiddenStateExtractor(cfg)
+    nli_device = (os.getenv("NLI_DEVICE") or "cpu").strip()
+    local_nli = (cfg.root_dir / "models" / "cross-encoder-nli-deberta-v3-small").resolve()
+    nli_model = str(local_nli) if local_nli.is_dir() and (local_nli / "config.json").exists() else None
+    nli_scorer = NLICrossEncoderScorer(device=nli_device, model_id=nli_model)
 
     all_metrics: Dict[str, Dict[str, Any]] = {}
     for ds in datasets:
@@ -1109,6 +1257,7 @@ def main() -> None:
             skip_prepare=args.skip_prepare,
             skip_trajectories=args.skip_trajectories,
             hidden_state_extractor=hidden_state_extractor,
+            nli_scorer=nli_scorer,
         )
 
     report_path = build_stage1_report(cfg, datasets, all_metrics)
