@@ -1,6 +1,6 @@
 **项目名称：** Pandora's RAG: Optimal Stopping for Multi-Hop Retrieval with Anytime-Valid Risk Control
 （潘多拉 RAG：基于任意时刻有效风险控制的多跳检索最优停止）
-**目标会议：** NeurIPS 2026 / ICLR 2027
+**目标会议：** emnlp 2026
 
 ---
 
