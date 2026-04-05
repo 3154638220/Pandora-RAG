@@ -8,12 +8,14 @@
 
 ## Conda 环境
 
-| 项 | 说明 |
-|----|------|
-| **环境名** | `pandora-rag` |
-| **Python** | 3.11 |
-| **依赖** | 仓库根目录 `requirements.txt`（`pip install -r requirements.txt`） |
-| **推理** | 同环境中已安装 **vLLM**（当前 `vllm==0.18.1`，随附 PyTorch CUDA；未写入 `requirements.txt`，其他机器需自行 `pip install vllm`） |
+
+| 项          | 说明                                                                                                    |
+| ---------- | ----------------------------------------------------------------------------------------------------- |
+| **环境名**    | `pandora-rag`                                                                                         |
+| **Python** | 3.11                                                                                                  |
+| **依赖**     | 仓库根目录 `requirements.txt`（`pip install -r requirements.txt`）                                           |
+| **推理**     | 同环境中已安装 **vLLM**（当前 `vllm==0.18.1`，随附 PyTorch CUDA；未写入 `requirements.txt`，其他机器需自行 `pip install vllm`） |
+
 
 激活：`conda activate pandora-rag`。
 
@@ -35,18 +37,20 @@
 
 在仓库根目录执行 `ls -la` 可见：
 
-| 项目内路径     | 指向 |
-|----------------|------|
-| `data`         | `/home/x12dpg/haoge/hjx_data/Pandora-RAG/datasets` |
-| `models`       | `/home/x12dpg/haoge/hjx_data/Pandora-RAG/models` |
-| `checkpoints`  | `/home/x12dpg/haoge/hjx_data/Pandora-RAG/checkpoints` |
-| `logs`         | `/home/x12dpg/haoge/hjx_data/Pandora-RAG/logs` |
+
+| 项目内路径         | 指向                                                    |
+| ------------- | ----------------------------------------------------- |
+| `data`        | `/home/x12dpg/haoge/hjx_data/Pandora-RAG/datasets`    |
+| `models`      | `/home/x12dpg/haoge/hjx_data/Pandora-RAG/models`      |
+| `checkpoints` | `/home/x12dpg/haoge/hjx_data/Pandora-RAG/checkpoints` |
+| `logs`        | `/home/x12dpg/haoge/hjx_data/Pandora-RAG/logs`        |
+
 
 代码中仍使用 `data/`、`models/` 等相对路径即可，无需改逻辑。
 
 ### Stage1 本地权重与 `--root-dir`
 
-- **Hidden states** 默认使用 **Meta-Llama-3.1-8B-Instruct** 本地目录。解析顺序为：`{--root-dir}/models/...` → **本仓库根目录** `models/Meta-Llama-3.1-8B-Instruct`（即上表符号链接，实际在 haoge）→ 环境变量 **`PANDORA_MODELS_ROOT`**（可设为 `/home/x12dpg/haoge/hjx_data/Pandora-RAG/models`）。因此即使用 `--root-dir` 指到临时目录，只要仓库内 `models` 已正确链接到大盘，仍会加载 haoge 上的权重，无需手写绝对路径。
+- **Hidden states** 默认使用 **Meta-Llama-3.1-8B-Instruct** 本地目录。解析顺序为：`{--root-dir}/models/...` → **本仓库根目录** `models/Meta-Llama-3.1-8B-Instruct`（即上表符号链接，实际在 haoge）→ 环境变量 `**PANDORA_MODELS_ROOT`**（可设为 `/home/x12dpg/haoge/hjx_data/Pandora-RAG/models`）。因此即使用 `--root-dir` 指到临时目录，只要仓库内 `models` 已正确链接到大盘，仍会加载 haoge 上的权重，无需手写绝对路径。
 - 若在无 symlink 的机器上仅有大盘路径，可设置：`export PANDORA_MODELS_ROOT=/home/x12dpg/haoge/hjx_data/Pandora-RAG/models`。
 
 ### 数据集与 Hugging Face `test` split
@@ -68,7 +72,7 @@ export HF_HUB_DISABLE_SYMLINKS_WARNING=1
 
 当前 haoge 挂载（CIFS/SMB）**不支持创建符号链接**（`ln -s` 会报 Input/output error）。Hugging Face Hub 默认在缓存里大量使用「快照目录 → blobs」的相对符号链接。
 
-因此迁移缓存时采用了 **`rsync -aL`**（跟随符号链接、复制真实文件），而不是保留链接。后果是：
+因此迁移缓存时采用了 `**rsync -aL`**（跟随符号链接、复制真实文件），而不是保留链接。后果是：
 
 - 大盘上缓存体积会比「仅 blobs + 链接」略大（存在 blobs 与快照中的重复内容），但在约 68T 可用空间下通常可接受。
 - 之后在本机使用 `HF_HOME` 指向该路径时，`huggingface_hub` 会检测到该目录不支持 symlink，新下载会走「非链接」策略，与当前磁盘能力一致。

@@ -9,7 +9,7 @@
 
 **1. 轨迹收集与状态缓存 (Trajectory Caching)**
 
-- **数据集扩充**：HotpotQA (2-hop), MuSiQue (2-4 hop), 2WikiMultiHopQA。每个数据集准备 Train: 4000条、Calib(校准集): 1000条、Dev: 1000条、Test: 1000条；共形预测与 E-value 阈値校准严禁在 Test 上拟合。
+- **数据集扩充**：HotpotQA (2-hop), MuSiQue (2-4 hop), 2WikiMultiHopQA。目标配额：**Train 4000、Calib 1000、Dev 1000、Test 1000**（每数据集）；共形预测与 E-value 阈値校准严禁在 Test 上拟合。若某数据集在 Hub 上 **无独立 test split**、且 **validation 总条数不足以同时容纳 Calib+Dev+满额 Test**，则 `prepare_data` **自动收窄从 validation 划出的 Test**（优先保证 Calib/Dev 各 1000），日志会打印 WARNING；当前 **MuSiQue**（`dgslibisey/MuSiQue`）在默认配额下 Test 约为 **417 条**，HotpotQA / 2Wiki 仍可满 **1000** Test。
 - **特征提取（Two-Pass 核心架构改进）**：
   - **Pass 1: 高速生成与采样 (vLLM)**：利用 vLLM 极高的吞吐量，执行多跳文档检索，并使用 `temperature=0.7`, `n=10` 进行高效的局部采样，计算 **Semantic Entropy (语义熵)** 和 **Self-Consistency (自一致性)**。
   - **Pass 2: 状态提取 (HuggingFace)**：关闭 KV-Cache 重新加载生成的历史轨迹，执行一次纯前向传播 (Forward-pass)，提取大模型生成最终答案时的最后一层 **Hidden States** (取最后一个 token，采用 float16 压缩存储)。
@@ -17,7 +17,7 @@
 
 ### 第一阶段执行清单（可直接落地）
 
-> 目标验收线：拿到 `3 数据集 x 7000 条样本` 的完整轨迹缓存，并产出 Oracle 帕累托前沿。
+> 目标验收线：三数据集均完成轨迹与特征缓存（Train+Calib+Dev+Test 按 manifest 实际条数；Hotpot/2Wiki 合计约 7000/数据集，MuSiQue 在自适应 Test 下合计约 **6417**/数据集），并产出 Oracle 帕累托前沿。
 
 **A. 数据准备（D1-D3）**
 
@@ -28,10 +28,11 @@
   - 输出：`data/processed/{dataset}/{train,calib,dev,test}.jsonl`。
   - 验收：每条样本字段完整；可被统一 loader 无报错读取。
 - **A2. 严格四切分 (Train/Calib/Dev/Test)**
-  - 配额：Train=4000、Calib=1000、Dev=1000、Test=1000（每数据集）；Calib 专用于 E-value / CP 等阈値与 Betting 相关校准，**严禁在 Test 上拟合**。
+  - **目标配额**：Train=4000、Calib=1000、Dev=1000、Test=1000（由 `stage1.run_stage1` 的 `--*-quota` 控制）。Calib 专用于 E-value / CP 等阈値与 Betting 相关校准，**严禁在 Test 上拟合**。
+  - **无独立 test split 时的 Test 自适应**（实现：`stage1/run_stage1.py` 的 `prepare_data`）：HotpotQA、MuSiQue、2Wiki 当前镜像均不从 Hub 拉取可用 test gold，Test 从 **validation 尾部**切出。切分前须预留 **Calib+Dev** 共 2000 条在剩余 validation 中；若 `len(validation) < 2000 + test_quota`，则令 `test_actual = min(test_quota, len(validation) - 2000)`，避免 MuSiQue 等 **validation 偏小** 时无法划分。Train 仍从 **train** split 抽样；各 split **id 正交**不变。
   - 规则：固定随机种子 `seed=42`；各划分样本 id **绝对正交、互不交叉**。
-  - **Manifest**：`data/splits/{dataset}_seed42_manifest.json`（保存各 split 的样本 `id` 列表，便于复现与审计）。
-  - 验收：重复运行切分脚本，`id` 列表完全一致；Calib 与 Test 无重叠。
+  - **Manifest**：`data/splits/{dataset}_seed42_manifest.json` 含 `quota_requested`（命令行目标）与 `**quota`（各 split 实际条数）** 及 `selected_ids`，便于复现与审计。
+  - 验收：重复运行切分脚本，`id` 列表完全一致；Calib 与 Test 无重叠；manifest 中 `quota` 与 `data/processed/.../*.jsonl` 行数一致。
 
 **B. 轨迹收集与深层特征缓存（D4-D8）**
 
@@ -41,7 +42,8 @@
   - 验收：随机抽样 100 条轨迹，步级字段完整率 100%。
 - **B2. 深层信号落地（Two-Pass 与落盘）**
   - **Pass 1 (vLLM)**：`temperature=0.7`，每步采样 `n=10`；将 **Semantic Entropy / Self-Consistency** 指标写入轨迹步级字段（如 `semantic_entropy`, `self_consistency` 或等价命名），验收要求在 Dev 上分布非全零、非常数。
-  - **Pass 2 (HuggingFace)**：对已定稿的生成轨迹做纯前向，提取最终答案处最后一层 hidden（`last_token`，**float16**），输出 `cache/features/{dataset}/{split}/hidden_states/*.npz`；验收：维度一致、坏文件率 0、可反序列化。
+    - **HTTP 次数说明**：`pretest/utils/llm_client.py` 的 `generate_n` 在兼容 OpenAI 接口支持 `n` 参数时，每检索步为 **1 次 HTTP 请求**（单次请求内 `n=10` 个 completion）；若批量请求失败则回退为 **每步 10 次**逐条请求。故单条轨迹在 `K_max=5` 下理想为 **5 次 HTTP/样本**，fallback 时约 **50 次 HTTP/样本**（与「解码/采样总次数」量级分开理解：服务端仍为每步生成 10 个答案）。
+  - **Pass 2 (HuggingFace)**：每条样本在 **整条轨迹**（至多 `K_max` 步）结束后做一次前向，提取最终答案处最后一层 hidden（`last_token`，**float16**），写入 **每样本 1 个** `cache/features/{dataset}/{split}/hidden_states/{id}.npz`（内含 `last_token` / `mean_pool` 等）；**5 步的中间状态**落在 `cache/trajectories/.../trajectories.jsonl` 的 `steps` 数组中，而非 5 个 npz。验收：维度一致、坏文件率 0、可反序列化。
   - **NLI / 重叠**：步级字段如 `ctx_overlap`、`nli_entail`、`nli_contra`（或 `cross-encoder/nli-deberta-v3-small` 的 entailment score）；验收：随步数有统计变化，避免特征失效。
 
 **C. Oracle 锚定与天花板估计（D9-D11）**
@@ -151,9 +153,34 @@ $$ \mathcal{L}(\theta) = \sum_{k} | \text{margin}_k | \cdot \text{BCELoss}(\hat{
 
 ## 💡 风险预案 (Contingency Plan)
 
+### Stage1 全量前检查（工程）
+
+- **vLLM**：并发与耗时与后端吞吐强相关；多跳间 prompt 前缀重叠大，建议部署时开启 **Prefix Caching**（如 `--enable-prefix-caching`）。
+- **NLI**：`NLICrossEncoderScorer`（`stage1/run_stage1.py`）懒加载；正式跑之前应在 `**conda activate pandora-rag`** 环境下做冒烟（见下），确认日志出现 `**NLI CrossEncoder 已加载`**；若仅见 `NLI 推理失败，回退启发式` 则说明未走真实 CrossEncoder。
+- **落盘 I/O**：`cache/`（轨迹 jsonl + `hidden_states/*.npz`）会产生大量小文件，**务必放在 SSD**；可用 `python -m stage1.run_stage1 --root-dir <SSD 上的目录>` 将缓存根指到快速盘。
+
+**NLI 冒烟（不跑完整 Stage1、不加载 8B hidden 模型）**：
+
+```bash
+conda activate pandora-rag
+cd /path/to/Pandora-RAG
+python -c "
+import logging, importlib.util, sys
+from pathlib import Path
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+p = Path('stage1/run_stage1.py')
+spec = importlib.util.spec_from_file_location('stage1_run', p)
+m = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+m.NLICrossEncoderScorer().entail_contra('A dog runs.', 'A dog runs in the park.')
+"
+```
+
 1. **算力限制导致 vLLM / HF 调度过慢**
   *应对方案*：若 `Llama-3.1-8B-Instruct` 在提取特征时过于耗时，将轻量级基线模型替换为 `Qwen-2.5-3B-Instruct` 进行对比跑分，在关键的主数据集上再使用 8B 模型。
 2. **E-value 过于保守，导致模型退化成全部检索 5 步**
   *应对方案*：这通常是因为初始信用太低。调整 Betting Score 函数，允许模型在初期积累一定的“信用盈余 (Credit surplus)”，或引入适度的 Betting 赌注折现因子。
 3. **Oracle 效果不明显（多跳失效）**
   *应对方案*：如果提供所有的正确文档 F1 依然提不上去，说明遇到了 LLM 的基础阅读理解瓶颈。此时调整质量函数，从单纯的 F1 放宽为“是否包含了正确答案的实体（Recall）”，改变上限评估维度。
+

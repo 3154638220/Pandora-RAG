@@ -10,8 +10,10 @@ Covers:
 Usage:
   python -m stage1.run_stage1 --datasets hotpotqa,musique,2wiki --max-k 5
 
-数据划分默认 Train=4000 / Calib=1000 / Dev=1000 / Test=1000；NLI 默认 CPU（NLI_DEVICE）。
-权重可放任意盘：设 NLI_MODEL_DIR 指向本地下载目录（如 models/cross-encoder-nli-deberta-v3-small）即离线加载。
+数据划分默认 Train=4000 / Calib=1000 / Dev=1000 / Test=1000；无独立 test split 时从 validation 划 test，
+若 validation 总条数不足 Calib+Dev+Test，则自动收窄 test（保证 Calib/Dev 满额），详见 experiments.md A2。
+NLI 默认 CPU（NLI_DEVICE）。权重可放任意盘：设 NLI_MODEL_DIR 指向本地下载目录
+（如 models/cross-encoder-nli-deberta-v3-small）即离线加载。
 """
 
 from __future__ import annotations
@@ -558,12 +560,34 @@ def prepare_data(cfg: Stage1Config, dataset_name: str) -> Dict[str, int]:
     val_list = list(val_raw) if val_raw is not None else []
     test_list = list(test_raw) if test_raw is not None else []
 
+    need_val = cfg.calib_quota + cfg.dev_quota
     if not test_list and val_list:
-        cut = min(len(val_list), cfg.test_quota)
+        V = len(val_list)
+        if V < need_val:
+            raise RuntimeError(
+                f"{dataset_name}: validation 共 {V} 条，不足以划分 Calib+Dev（需 {need_val} 条互不重复样本）。"
+            )
+        # 无独立 test split 时从 validation 尾部划 test，但必须为 Calib+Dev 留出空间。
+        # MuSiQue 等数据集的 validation 较小（≈2.4k），若固定 test=1000 会导致剩余 <2000。
+        max_test = V - need_val
+        cut = min(cfg.test_quota, max_test)
+        if cut < 1:
+            raise RuntimeError(
+                f"{dataset_name}: validation={V} 在预留 Calib+Dev={need_val} 后无法划出 test。"
+            )
+        if cut < cfg.test_quota:
+            LOGGER.warning(
+                "%s: validation=%d 条，test 由请求的 %d 收窄为 %d，以保证 Calib=%d + Dev=%d。",
+                dataset_name,
+                V,
+                cfg.test_quota,
+                cut,
+                cfg.calib_quota,
+                cfg.dev_quota,
+            )
         test_list = val_list[-cut:]
         val_list = val_list[:-cut]
 
-    need_val = cfg.calib_quota + cfg.dev_quota
     if len(val_list) < need_val:
         raise RuntimeError(
             f"{dataset_name}: validation 池不足以划分 Calib+Dev（需 {need_val} 条互不重复样本，"
@@ -598,18 +622,25 @@ def prepare_data(cfg: Stage1Config, dataset_name: str) -> Dict[str, int]:
         "dev": dev_rows,
         "test": test_rows,
     }
-    quotas = {
+    quota_requested = {
         "train": cfg.train_quota,
         "calib": cfg.calib_quota,
         "dev": cfg.dev_quota,
         "test": cfg.test_quota,
+    }
+    quotas_effective = {
+        "train": len(train_rows),
+        "calib": len(calib_rows),
+        "dev": len(dev_rows),
+        "test": len(test_rows),
     }
 
     counts: Dict[str, int] = {}
     manifest: Dict[str, Any] = {
         "dataset": dataset_name,
         "seed": cfg.seed,
-        "quota": quotas,
+        "quota_requested": quota_requested,
+        "quota": quotas_effective,
         "selected_ids": {},
         "timestamp": int(time.time()),
     }
