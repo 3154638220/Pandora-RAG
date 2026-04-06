@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import random
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -50,6 +51,8 @@ class Stage2Config:
     oracle_cost_metric: str = "fixed"
     root_dir: Path = Path(".")
     hidden_state_key: str = "last_token"
+    # C1：Shallow-Only — 不使用 Stage1 的 hidden states，仅 9 维浅层特征训练 Probe（w/o Deep Features）。
+    shallow_only: bool = False
 
     # Training
     hidden_dim: int = 256
@@ -125,6 +128,10 @@ def _ensure_dirs(cfg: Stage2Config, datasets: Sequence[str]) -> None:
         (cfg.artifacts_probe_dir / ds).mkdir(parents=True, exist_ok=True)
 
 
+def _stage2_artifact_tag(cfg: Stage2Config) -> str:
+    return "_shallow" if cfg.shallow_only else ""
+
+
 def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     with path.open("r", encoding="utf-8") as f:
@@ -180,7 +187,7 @@ def _load_hidden_map(
     split: str,
     hidden_dim: int,
     key: str,
-) -> Dict[str, np.ndarray]:
+) -> Dict[Tuple[str, int], np.ndarray]:
     if hidden_dim <= 0:
         return {}
     feat_dir = cfg.features_dir / dataset / split / "hidden_states"
@@ -188,10 +195,18 @@ def _load_hidden_map(
         LOGGER.warning("%s 不存在，当前 split 使用零向量 hidden。", feat_dir)
         return {}
 
-    out: Dict[str, np.ndarray] = {}
+    out: Dict[Tuple[str, int], np.ndarray] = {}
     bad = 0
     for fp in feat_dir.glob("*.npz"):
-        sample_id = fp.stem
+        stem = fp.stem
+        # 新格式：{sample_id}_step{k}.npz；旧格式：{sample_id}.npz（视为 step=0 的兜底）。
+        match = re.match(r"^(?P<sample_id>.+)_step(?P<step>\d+)$", stem)
+        if match:
+            sample_id = match.group("sample_id")
+            step_idx = int(match.group("step"))
+        else:
+            sample_id = stem
+            step_idx = 0
         try:
             with np.load(fp) as obj:
                 if key not in obj:
@@ -201,7 +216,7 @@ def _load_hidden_map(
                 if vec.size != hidden_dim:
                     bad += 1
                     continue
-                out[sample_id] = vec
+                out[(sample_id, step_idx)] = vec
         except Exception:
             bad += 1
     if bad > 0:
@@ -254,7 +269,7 @@ def _make_oracle_maps(
 def _build_xyw(
     trajectories: List[Dict[str, Any]],
     oracle_by_id: Dict[str, Dict[int, Dict[str, Any]]],
-    hidden_map: Dict[str, np.ndarray],
+    hidden_map: Dict[Tuple[str, int], np.ndarray],
     hidden_dim: int,
     cfg: Stage2Config,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, int]]:
@@ -265,6 +280,7 @@ def _build_xyw(
     n_missing_hidden = 0
     n_missing_label = 0
     total_steps = 0
+    supervised_steps = 0
 
     zero_hidden = np.zeros((hidden_dim,), dtype=np.float32)
 
@@ -273,10 +289,6 @@ def _build_xyw(
         if not sample_id:
             continue
         step_targets = oracle_by_id.get(sample_id, {})
-        hidden = hidden_map.get(sample_id, zero_hidden)
-        if sample_id not in hidden_map:
-            n_missing_hidden += 1
-
         steps = sorted(traj.get("steps") or [], key=lambda s: int(s.get("step", 0)))
         for step in steps:
             total_steps += 1
@@ -291,6 +303,10 @@ def _build_xyw(
             action_label = float(target.get("action_label", 0))
             margin = float(target.get("margin", 0.0))
             weight = max(cfg.margin_weight_floor, abs(margin))
+            supervised_steps += 1
+            hidden = hidden_map.get((sample_id, k), hidden_map.get((sample_id, 0), zero_hidden))
+            if hidden_dim > 0 and (sample_id, k) not in hidden_map and (sample_id, 0) not in hidden_map:
+                n_missing_hidden += 1
 
             shallow = np.asarray(_step_shallow_features(step, k, cfg), dtype=np.float32)
             feat = np.concatenate([shallow, hidden], axis=0)
@@ -301,13 +317,13 @@ def _build_xyw(
     if not x_rows:
         raise RuntimeError("可训练样本为空，请确认 Stage1 轨迹与 Oracle 标签是否完整。")
 
-    n_traj = max(1, len(trajectories))
-    if n_missing_hidden / n_traj > 0.05:
+    n_supervised = max(1, supervised_steps)
+    if hidden_dim > 0 and n_missing_hidden / n_supervised > 0.05:
         LOGGER.warning(
-            "超过 5%% 的样本缺失 Hidden States（missing_hidden_ids=%d / trajectories=%d），"
+            "超过 5%% 的监督步缺失 Hidden States（missing_hidden_steps=%d / supervised_steps=%d），"
             "请检查 Stage 1 的 hidden_states 缓存是否完整。",
             n_missing_hidden,
-            len(trajectories),
+            supervised_steps,
         )
 
     stats = {
@@ -452,7 +468,7 @@ def _train_probe(
 
 def _build_step_feature_map(
     trajectories: List[Dict[str, Any]],
-    hidden_map: Dict[str, np.ndarray],
+    hidden_map: Dict[Tuple[str, int], np.ndarray],
     hidden_dim: int,
     cfg: Stage2Config,
 ) -> Dict[Tuple[str, int], np.ndarray]:
@@ -462,11 +478,11 @@ def _build_step_feature_map(
         sample_id = str(traj.get("id", ""))
         if not sample_id:
             continue
-        hidden = hidden_map.get(sample_id, zero_hidden)
         for step in traj.get("steps") or []:
             k = int(step.get("step", 0))
             if k <= 0:
                 continue
+            hidden = hidden_map.get((sample_id, k), hidden_map.get((sample_id, 0), zero_hidden))
             shallow = np.asarray(_step_shallow_features(step, k, cfg), dtype=np.float32)
             out[(sample_id, k)] = np.concatenate([shallow, hidden], axis=0)
     return out
@@ -679,7 +695,9 @@ def _pareto_nondominated_min_cost_max_f1(
     return sorted(nd, key=lambda t: (t[0], -t[1]))
 
 
-def _plot_dataset_pareto(df: pd.DataFrame, dataset: str, out_path: Path) -> None:
+def _plot_dataset_pareto(
+    df: pd.DataFrame, dataset: str, out_path: Path, title_extra: str = ""
+) -> None:
     fig, ax = plt.subplots(1, 1, figsize=(7.5, 5))
     points: List[Tuple[float, float]] = []
     for _, row in df.iterrows():
@@ -714,7 +732,8 @@ def _plot_dataset_pareto(df: pd.DataFrame, dataset: str, out_path: Path) -> None
 
     ax.set_xlabel("Avg cumulative cost (normalized)")
     ax.set_ylabel("F1")
-    ax.set_title(f"Stage2 Probe Pareto - {dataset}")
+    suffix = f" ({title_extra})" if title_extra else ""
+    ax.set_title(f"Stage2 Probe Pareto - {dataset}{suffix}")
     ax.grid(alpha=0.25)
     handles, labels = ax.get_legend_handles_labels()
     by_label = dict(zip(labels, handles))
@@ -730,10 +749,17 @@ def run_dataset_stage2(cfg: Stage2Config, dataset: str) -> Dict[str, Any]:
     dev_traj = _load_trajectories(cfg, dataset, "dev")
     test_traj = _load_trajectories(cfg, dataset, "test")
 
-    hidden_dim = _infer_hidden_dim(cfg, dataset, "train", cfg.hidden_state_key)
-    train_hidden = _load_hidden_map(cfg, dataset, "train", hidden_dim, cfg.hidden_state_key)
-    dev_hidden = _load_hidden_map(cfg, dataset, "dev", hidden_dim, cfg.hidden_state_key)
-    test_hidden = _load_hidden_map(cfg, dataset, "test", hidden_dim, cfg.hidden_state_key)
+    if cfg.shallow_only:
+        LOGGER.info("Shallow-Only 模式：不使用 hidden states，输入维度=%d。", SHALLOW_FEATURE_DIM)
+        hidden_dim = 0
+        train_hidden: Dict[str, np.ndarray] = {}
+        dev_hidden = {}
+        test_hidden = {}
+    else:
+        hidden_dim = _infer_hidden_dim(cfg, dataset, "train", cfg.hidden_state_key)
+        train_hidden = _load_hidden_map(cfg, dataset, "train", hidden_dim, cfg.hidden_state_key)
+        dev_hidden = _load_hidden_map(cfg, dataset, "dev", hidden_dim, cfg.hidden_state_key)
+        test_hidden = _load_hidden_map(cfg, dataset, "test", hidden_dim, cfg.hidden_state_key)
 
     train_oracle_map, _train_oracle_rows = _make_oracle_maps(train_traj, cfg)
     dev_oracle_map, _dev_oracle_rows = _make_oracle_maps(dev_traj, cfg)
@@ -796,17 +822,20 @@ def run_dataset_stage2(cfg: Stage2Config, dataset: str) -> Dict[str, Any]:
     rows.append(oracle_summary)
 
     table_df = pd.DataFrame(rows).sort_values(by=["avg_cost", "avg_f1"], ascending=[True, False])
-    table_path = cfg.results_dir / f"stage2_probe_table_{dataset}.csv"
+    tag = _stage2_artifact_tag(cfg)
+    table_path = cfg.results_dir / f"stage2_probe_table_{dataset}{tag}.csv"
     table_df.to_csv(table_path, index=False)
 
-    pareto_path = cfg.results_dir / f"stage2_probe_pareto_{dataset}.png"
-    _plot_dataset_pareto(table_df, dataset, pareto_path)
+    pareto_path = cfg.results_dir / f"stage2_probe_pareto_{dataset}{tag}.png"
+    _plot_dataset_pareto(
+        table_df, dataset, pareto_path, title_extra="Shallow-Only" if cfg.shallow_only else ""
+    )
 
     best_fixed = max((r["avg_f1"] for r in fixed_rows), default=0.0)
     probe_gain = float(probe_row["avg_f1"] - best_fixed)
     oracle_gap = float(oracle_summary["avg_f1"] - probe_row["avg_f1"])
 
-    model_path = cfg.artifacts_probe_dir / dataset / "probe_mlp.pt"
+    model_path = cfg.artifacts_probe_dir / dataset / f"probe_mlp{tag}.pt"
     torch.save(
         {
             "model_state_dict": model.state_dict(),
@@ -818,11 +847,13 @@ def run_dataset_stage2(cfg: Stage2Config, dataset: str) -> Dict[str, Any]:
             "scaler_mean": scaler.mean_.astype(np.float32),
             "scaler_scale": scaler.scale_.astype(np.float32),
             "shallow_feature_dim": SHALLOW_FEATURE_DIM,
+            "shallow_only": bool(cfg.shallow_only),
+            "stage1_hidden_dim": int(hidden_dim),
         },
         model_path,
     )
 
-    meta_path = cfg.artifacts_probe_dir / dataset / "stage2_train_meta.json"
+    meta_path = cfg.artifacts_probe_dir / dataset / f"stage2_train_meta{tag}.json"
     _write_json(
         meta_path,
         {
@@ -839,6 +870,7 @@ def run_dataset_stage2(cfg: Stage2Config, dataset: str) -> Dict[str, Any]:
             "best_fixed_f1": best_fixed,
             "probe_gain_over_best_fixed": probe_gain,
             "oracle_gap_to_probe": oracle_gap,
+            "shallow_only": bool(cfg.shallow_only),
             "table_path": str(table_path),
             "pareto_path": str(pareto_path),
             "model_path": str(model_path),
@@ -860,9 +892,11 @@ def run_dataset_stage2(cfg: Stage2Config, dataset: str) -> Dict[str, Any]:
     }
 
 
-def build_stage2_report(results: Dict[str, Dict[str, Any]], out_path: Path) -> Path:
+def build_stage2_report(
+    results: Dict[str, Dict[str, Any]], out_path: Path, title_suffix: str = ""
+) -> Path:
     lines: List[str] = []
-    lines.append("# Stage2 Report")
+    lines.append("# Stage2 Report" + (f" ({title_suffix})" if title_suffix else ""))
     lines.append("")
     lines.append("## Probe Performance")
     lines.append("")
@@ -936,6 +970,11 @@ def parse_args() -> argparse.Namespace:
         help="margin 加权 BCE 的最小样本权重。",
     )
     parser.add_argument("--root-dir", type=str, default=".")
+    parser.add_argument(
+        "--shallow-only",
+        action="store_true",
+        help="仅使用 9 维浅层特征训练 Probe，不使用 Stage1 的 hidden states（w/o Deep Features 对照）。",
+    )
     return parser.parse_args()
 
 
@@ -964,6 +1003,7 @@ def main() -> None:
         epochs=args.epochs,
         patience=args.patience,
         margin_weight_floor=args.margin_weight_floor,
+        shallow_only=bool(args.shallow_only),
     )
 
     _set_seed(cfg.seed)
@@ -974,7 +1014,11 @@ def main() -> None:
         LOGGER.info("===== Stage2 dataset: %s =====", ds)
         all_results[ds] = run_dataset_stage2(cfg, ds)
 
-    report_path = build_stage2_report(all_results, cfg.results_dir / "stage2_report.md")
+    report_name = "stage2_report_shallow.md" if cfg.shallow_only else "stage2_report.md"
+    report_title = "Shallow-Only Probe" if cfg.shallow_only else ""
+    report_path = build_stage2_report(
+        all_results, cfg.results_dir / report_name, title_suffix=report_title
+    )
     LOGGER.info("Stage2 complete. Report: %s", report_path)
     for ds in datasets:
         info = all_results[ds]

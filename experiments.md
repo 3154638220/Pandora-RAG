@@ -12,12 +12,12 @@
 - **数据集扩充**：HotpotQA (2-hop), MuSiQue (2-4 hop), 2WikiMultiHopQA。目标配额：**Train 4000、Calib 1000、Dev 1000、Test 1000**（每数据集）；共形预测与 E-value 阈値校准严禁在 Test 上拟合。若某数据集在 Hub 上 **无独立 test split**、且 **validation 总条数不足以同时容纳 Calib+Dev+满额 Test**，则 `prepare_data` **自动收窄从 validation 划出的 Test**（优先保证 Calib/Dev 各 1000），日志会打印 WARNING；当前 **MuSiQue**（`dgslibisey/MuSiQue`）在默认配额下 Test 约为 **417 条**，HotpotQA / 2Wiki 仍可满 **1000** Test。
 - **特征提取（Two-Pass 核心架构改进）**：
   - **Pass 1: 高速生成与采样 (vLLM)**：利用 vLLM 极高的吞吐量，执行多跳文档检索，并使用 `temperature=0.7`, `n=10` 进行高效的局部采样，计算 **Semantic Entropy (语义熵)** 和 **Self-Consistency (自一致性)**。
-  - **Pass 2: 状态提取 (HuggingFace)**：关闭 KV-Cache 重新加载生成的历史轨迹，执行一次纯前向传播 (Forward-pass)，提取大模型生成最终答案时的最后一层 **Hidden States** (取最后一个 token，采用 float16 压缩存储)。
+  - **Pass 2: 状态提取 (HuggingFace) — 方案 B1（动态逐步）**：在**每一步**检索并完成该步生成后，对该步的输入（问题 + 截至该步的累积上下文 + 该步当前答案）做一次前向（`output_hidden_states=True`，关闭 KV cache），提取最后一层 **Hidden States**（`last_token`，可选 `mean_pool`，**float16** 落盘）。多跳 RAG 的状态随检索轮次变化，**必须为每个时间步各存一份表征**，而不能只在整条轨迹结束后对「最终答案」做一次前向（否则 Stage 2 与时间步错位）。落盘文件名：`{id}_step{k}.npz`，`k=1..K_max`（见下文 **B2**）。
   - **Context-Question Overlap / NLI**：引入轻量级 `cross-encoder/nli-deberta-v3-small` 评估检索文档与历史信息的包含关系，避免使用大模型导致算力浪费。
 
 ### 第一阶段执行清单（可直接落地）
 
-> 目标验收线：三数据集均完成轨迹与特征缓存（Train+Calib+Dev+Test 按 manifest 实际条数；Hotpot/2Wiki 合计约 7000/数据集，MuSiQue 在自适应 Test 下合计约 **6417**/数据集），并产出 Oracle 帕累托前沿。
+> 目标验收线：三数据集均完成轨迹与特征缓存（Train+Calib+Dev+Test 按 manifest 实际条数；Hotpot/2Wiki 合计约 7000/数据集，MuSiQue 在自适应 Test 下合计约 **6417**/数据集），**且每个样本具备 `K_max` 个逐步 hidden 文件**（`{id}_step{k}.npz`），并产出 Oracle 帕累托前沿。
 
 **A. 数据准备（D1-D3）**
 
@@ -43,7 +43,16 @@
 - **B2. 深层信号落地（Two-Pass 与落盘）**
   - **Pass 1 (vLLM)**：`temperature=0.7`，每步采样 `n=10`；将 **Semantic Entropy / Self-Consistency** 指标写入轨迹步级字段（如 `semantic_entropy`, `self_consistency` 或等价命名），验收要求在 Dev 上分布非全零、非常数。
     - **HTTP 次数说明**：`pretest/utils/llm_client.py` 的 `generate_n` 在兼容 OpenAI 接口支持 `n` 参数时，每检索步为 **1 次 HTTP 请求**（单次请求内 `n=10` 个 completion）；若批量请求失败则回退为 **每步 10 次**逐条请求。故单条轨迹在 `K_max=5` 下理想为 **5 次 HTTP/样本**，fallback 时约 **50 次 HTTP/样本**（与「解码/采样总次数」量级分开理解：服务端仍为每步生成 10 个答案）。
-  - **Pass 2 (HuggingFace)**：每条样本在 **整条轨迹**（至多 `K_max` 步）结束后做一次前向，提取最终答案处最后一层 hidden（`last_token`，**float16**），写入 **每样本 1 个** `cache/features/{dataset}/{split}/hidden_states/{id}.npz`（内含 `last_token` / `mean_pool` 等）；**5 步的中间状态**落在 `cache/trajectories/.../trajectories.jsonl` 的 `steps` 数组中，而非 5 个 npz。验收：维度一致、坏文件率 0、可反序列化。
+  - **Pass 2 (HuggingFace) — 与 plan.md「优先级 2 / B1」一致（动态深层特征）**：
+    - **落盘约定**：每样本、每检索步各 **1 个**压缩文件：`cache/features/{dataset}/{split}/hidden_states/{id}_step{k}.npz`（`k` 与轨迹中 `steps[].step` 一致，通常 `1..K_max`），内含 `last_token`（及 `mean_pool` 等），**float16**。
+    - **语义要求**：第 `k` 步文件对应「第 `k` 步检索后的累积上下文 + 该步生成后的当前答案」下的表征，与 `cache/trajectories/.../trajectories.jsonl` 中同一步的浅层统计（熵、NLI 等）**时间对齐**。文件总数约为「各 split 样本数 × `K_max`」，约为旧版「每样本单文件」方案的 `**K_max` 倍**（例如 `K_max=5` 时约 5 倍）。
+    - **Stage 2 读取**：`stage2/run_stage2.py` 优先匹配 `{id}_step{k}`；若仍存在历史 **无后缀** `{id}.npz`，仅作为 `step=0` 的兜底（正式论文实验应淘汰该形态）。
+    - **工程命令**（`conda activate pandora-rag`，仓库根目录）：
+      - 全量重跑 Pass 1+2（检索、LLM、逐步 npz）：`python -m stage1.run_stage1 --datasets hotpotqa,musique,2wiki --skip-prepare`（或去掉 `--skip-prepare` 以重切分）。
+      - **仅补跑某 split 的轨迹+逐步 npz**（其余 split 沿用已有 `trajectories.jsonl`）：`--skip-prepare --collect-splits train`（示例：修复 train 条数不足）。
+      - **已有完整轨迹、仅重提 hidden（不调用 vLLM）**：`--skip-prepare --reextract-hidden-only`；可用 `--reextract-splits calib,dev` 限定 split。
+    - **一致性自检**：`wc -l data/processed/{ds}/{split}.jsonl` 应与 `wc -l cache/trajectories/{ds}/{split}/trajectories.jsonl` **相等**；`find cache/features/{ds}/{split}/hidden_states -name '*.npz' | wc -l` 应约为 `N_split × K_max`（缺步或中断会导致明显偏少）。
+    - **验收**：维度一致、坏文件率 0、可反序列化；**禁止**在仅存在「每样本单 npz」的情况下进入 Stage 2 主实验（除非明确做消融且清楚其与逐步 Oracle 标签不对齐）。
   - **NLI / 重叠**：步级字段如 `ctx_overlap`、`nli_entail`、`nli_contra`（或 `cross-encoder/nli-deberta-v3-small` 的 entailment score）；验收：随步数有统计变化，避免特征失效。
 
 **C. Oracle 锚定与天花板估计（D9-D11）**
@@ -60,10 +69,12 @@
 进入第二阶段（Neural Probe）前须同时满足：
 
 - 三数据集轨迹与特征缓存完成率 $\geq 98$；
+- 各 split 上 `**data/processed` 行数 = `cache/trajectories/.../trajectories.jsonl` 行数**（避免只跑部分 train/test 却误以为全量）；
+- **B1 动态特征**：hidden 落盘为 `{id}_step{k}.npz`，且各 split 的 `.npz` 数量与 `N × K_max` 一致（允许工程上极少数坏文件，但不得系统性缺步）；
 - 关键特征（hidden states / 语义熵与自一致性 / NLI）步级缺失率 $\leq 1$；
 - Oracle 相对**最佳固定步长策略**在 F1–Cost 平面上存在**可复现的显著优势**（至少一个数据集上明显提升）。
 
-若不满足：优先修复缓存链路、Two-Pass 一致性与特征稳定性，再进入 Probe 训练。
+若不满足：优先修复缓存链路、**逐步 hidden 与轨迹条数**、Two-Pass 一致性与特征稳定性，再进入 Probe 训练。
 
 ## 第二阶段：Neural Probe 攻坚战（核心难点） (Week 3-5)
 

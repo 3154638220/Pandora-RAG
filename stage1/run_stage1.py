@@ -10,6 +10,10 @@ Covers:
 Usage:
   python -m stage1.run_stage1 --datasets hotpotqa,musique,2wiki --max-k 5
 
+动态特征（B1）：每步检索与生成后，将 hidden state 存为 ``cache/features/.../hidden_states/{id}_step{k}.npz``。
+若已有轨迹但缺 .npz，可用 ``--skip-prepare --reextract-hidden-only`` 仅从 trajectories.jsonl 重提（不重复调用 LLM）。
+若某 split 的 trajectories.jsonl 条数少于 data/processed 下对应 jsonl，说明该 split 轨迹未跑满；可用 ``--skip-prepare --collect-splits train`` 只补跑指定 split 的检索+LLM+每步 hidden（其余 split 沿用已有缓存）。
+
 数据划分默认 Train=4000 / Calib=1000 / Dev=1000 / Test=1000；无独立 test split 时从 validation 划 test，
 若 validation 总条数不足 Calib+Dev+Test，则自动收窄 test（保证 Calib/Dev 满额），详见 experiments.md A2。
 NLI 默认 CPU（NLI_DEVICE）。权重可放任意盘：设 NLI_MODEL_DIR 指向本地下载目录
@@ -658,6 +662,63 @@ def prepare_data(cfg: Stage1Config, dataset_name: str) -> Dict[str, int]:
     return counts
 
 
+def _context_upto_step(steps_sorted: List[Dict[str, Any]], k_target: int) -> str:
+    """
+    与 collect_trajectories 中一致：按步序累积非空 retrieved_doc，得到第 k_target 步 extract 时用的上下文。
+    """
+    acc = ""
+    for s in steps_sorted:
+        kk = int(s.get("step", 0))
+        if kk > k_target:
+            break
+        doc = _normalize_text(s.get("retrieved_doc", ""))
+        if doc:
+            acc = (acc + "\n\n" + doc).strip()
+    return acc
+
+
+def reextract_hidden_states_from_trajectories(
+    cfg: Stage1Config,
+    dataset_name: str,
+    split: str,
+    hidden_state_extractor: HiddenStateExtractor,
+) -> int:
+    """
+    不调用检索/LLM，仅根据已有 trajectories.jsonl 重建每步 (question, context, answer) 并写入 ``{id}_step{k}.npz``。
+    """
+    traj_path = cfg.trajectories_dir / dataset_name / split / "trajectories.jsonl"
+    if not traj_path.exists():
+        raise FileNotFoundError(f"缺少轨迹缓存，无法重提 hidden states：{traj_path}")
+    rows = _read_jsonl(traj_path)
+    feature_dir = cfg.features_dir / dataset_name / split / "hidden_states"
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    for old_fp in feature_dir.glob("*.npz"):
+        old_fp.unlink()
+
+    for row in tqdm(rows, desc=f"reextract-hidden::{dataset_name}/{split}"):
+        q = _normalize_text(row.get("question", ""))
+        sample_id = row.get("id")
+        if not sample_id or not q:
+            continue
+        steps = sorted(row.get("steps") or [], key=lambda s: int(s.get("step", 0)))
+        for s in steps:
+            k = int(s.get("step", 0))
+            if k < 1:
+                continue
+            acc_context = _context_upto_step(steps, k)
+            current_answer = _normalize_text(s.get("current_answer", ""))
+            embedding_last, embedding_mean = hidden_state_extractor.extract(
+                q, acc_context, current_answer
+            )
+            feat_path = feature_dir / f"{sample_id}_step{k}.npz"
+            np.savez_compressed(
+                feat_path,
+                last_token=embedding_last.astype(np.float16),
+                mean_pool=embedding_mean.astype(np.float16),
+            )
+    return len(rows)
+
+
 def _retrieve_step_docs(question: str, current_answer: str, docs_pool: List[str], used: List[int]) -> Tuple[str, float, int]:
     if not docs_pool:
         return "", 0.0, -1
@@ -692,6 +753,8 @@ def collect_trajectories(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     feature_dir = cfg.features_dir / dataset_name / split / "hidden_states"
     feature_dir.mkdir(parents=True, exist_ok=True)
+    for old_fp in feature_dir.glob("*.npz"):
+        old_fp.unlink()
 
     produced = 0
     with out_path.open("w", encoding="utf-8") as writer:
@@ -753,13 +816,16 @@ def collect_trajectories(
                     }
                 )
 
-            embedding_last, embedding_mean = hidden_state_extractor.extract(q, acc_context, current_answer)
-            feat_path = feature_dir / f"{row['id']}.npz"
-            np.savez_compressed(
-                feat_path,
-                last_token=embedding_last.astype(np.float16),
-                mean_pool=embedding_mean.astype(np.float16),
-            )
+                # 每一步分别提取并缓存 hidden states，避免整条轨迹共享“最后一步”特征。
+                embedding_last, embedding_mean = hidden_state_extractor.extract(
+                    q, acc_context, current_answer
+                )
+                feat_path = feature_dir / f"{row['id']}_step{k}.npz"
+                np.savez_compressed(
+                    feat_path,
+                    last_token=embedding_last.astype(np.float16),
+                    mean_pool=embedding_mean.astype(np.float16),
+                )
 
             writer.write(
                 json.dumps(
@@ -776,6 +842,7 @@ def collect_trajectories(
                 )
                 + "\n"
             )
+            writer.flush()
             produced += 1
     return produced
 
@@ -1136,6 +1203,9 @@ def run_dataset_stage1(
     dataset_name: str,
     skip_prepare: bool,
     skip_trajectories: bool,
+    reextract_hidden_only: bool,
+    reextract_splits: Sequence[str],
+    collect_splits: Sequence[str],
     hidden_state_extractor: HiddenStateExtractor,
     nli_scorer: NLICrossEncoderScorer,
 ) -> Dict[str, Any]:
@@ -1149,8 +1219,17 @@ def run_dataset_stage1(
             counts[split] = len(_read_jsonl(p)) if p.exists() else 0
 
     cached_counts: Dict[str, int] = {}
+    all_splits = ("train", "calib", "dev", "test")
+    if skip_trajectories and reextract_hidden_only:
+        raise ValueError("--skip-trajectories 与 --reextract-hidden-only 互斥。")
+    if skip_trajectories and set(collect_splits) != set(all_splits):
+        raise ValueError(
+            "--skip-trajectories 已开启时不能缩小 --collect-splits（未列出的 split 不会从磁盘补算轨迹）。"
+        )
+    if reextract_hidden_only and set(collect_splits) != set(all_splits):
+        raise ValueError("--reextract-hidden-only 与缩小 --collect-splits 互斥。")
     if skip_trajectories:
-        for split in ["train", "calib", "dev", "test"]:
+        for split in all_splits:
             traj_path = cfg.trajectories_dir / dataset_name / split / "trajectories.jsonl"
             if not traj_path.exists():
                 raise FileNotFoundError(
@@ -1158,11 +1237,42 @@ def run_dataset_stage1(
                     "请先对该 split 跑过轨迹收集，或去掉该标志。"
                 )
             cached_counts[split] = len(_read_jsonl(traj_path))
+    elif reextract_hidden_only:
+        allowed = set(all_splits)
+        bad = [s for s in reextract_splits if s not in allowed]
+        if bad:
+            raise ValueError(f"--reextract-splits 含非法项 {bad}，仅允许 {sorted(allowed)}")
+        for split in all_splits:
+            traj_path = cfg.trajectories_dir / dataset_name / split / "trajectories.jsonl"
+            if split in reextract_splits:
+                cached_counts[split] = reextract_hidden_states_from_trajectories(
+                    cfg, dataset_name, split, hidden_state_extractor
+                )
+            else:
+                if not traj_path.exists():
+                    raise FileNotFoundError(
+                        f"--reextract-hidden-only 要求各 split 均存在轨迹；缺失：{traj_path}"
+                    )
+                cached_counts[split] = len(_read_jsonl(traj_path))
     else:
-        for split in ["train", "calib", "dev", "test"]:
-            cached_counts[split] = collect_trajectories(
-                cfg, dataset_name, split, hidden_state_extractor, nli_scorer
-            )
+        allowed_c = set(all_splits)
+        bad_c = [s for s in collect_splits if s not in allowed_c]
+        if bad_c:
+            raise ValueError(f"--collect-splits 含非法项 {bad_c}，仅允许 {sorted(allowed_c)}")
+        if not collect_splits:
+            raise ValueError("--collect-splits 不能为空")
+        for split in all_splits:
+            if split in collect_splits:
+                cached_counts[split] = collect_trajectories(
+                    cfg, dataset_name, split, hidden_state_extractor, nli_scorer
+                )
+            else:
+                traj_path = cfg.trajectories_dir / dataset_name / split / "trajectories.jsonl"
+                if not traj_path.exists():
+                    raise FileNotFoundError(
+                        f"未对 split={split} 执行轨迹收集（不在 --collect-splits 中），但缺少文件：{traj_path}"
+                    )
+                cached_counts[split] = len(_read_jsonl(traj_path))
 
     oracle_info = compute_oracle_and_pareto(cfg, dataset_name)
 
@@ -1243,6 +1353,23 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="不调用 LLM 重算轨迹与 hidden states，直接读 cache/trajectories 与 cache/features（用于只重跑部分数据集后合并报告）",
     )
+    parser.add_argument(
+        "--reextract-hidden-only",
+        action="store_true",
+        help="保留已有 trajectories.jsonl，仅按每步重建上下文并重提 hidden states 写入 {id}_step{k}.npz（不调用检索/LLM）",
+    )
+    parser.add_argument(
+        "--reextract-splits",
+        type=str,
+        default="train,calib,dev,test",
+        help="与 --reextract-hidden-only 联用：逗号分隔，指定要重写 .npz 的 split；未列出的 split 只校验轨迹存在并计入条数",
+    )
+    parser.add_argument(
+        "--collect-splits",
+        type=str,
+        default="train,calib,dev,test",
+        help="默认全量。逗号分隔，仅对这些 split 调用检索+LLM+写 trajectories 与每步 .npz；其余 split 必须已有 trajectories.jsonl（用于补跑缺条数的 split）",
+    )
     parser.add_argument("--root-dir", type=str, default=".")
     return parser.parse_args()
 
@@ -1255,6 +1382,22 @@ def main() -> None:
     unknown = [d for d in datasets if d not in allowed]
     if unknown:
         raise ValueError(f"不支持的数据集：{unknown}，只支持 {sorted(allowed)}")
+
+    reextract_splits = tuple(
+        x.strip().lower()
+        for x in (args.reextract_splits or "").split(",")
+        if x.strip()
+    )
+    if args.reextract_hidden_only and not reextract_splits:
+        raise ValueError("--reextract-hidden-only 需要非空的 --reextract-splits")
+
+    collect_splits = tuple(
+        x.strip().lower()
+        for x in (args.collect_splits or "").split(",")
+        if x.strip()
+    )
+    if not args.skip_trajectories and not args.reextract_hidden_only and not collect_splits:
+        raise ValueError("--collect-splits 不能为空")
 
     cfg = Stage1Config(
         seed=args.seed,
@@ -1287,6 +1430,9 @@ def main() -> None:
             ds,
             skip_prepare=args.skip_prepare,
             skip_trajectories=args.skip_trajectories,
+            reextract_hidden_only=args.reextract_hidden_only,
+            reextract_splits=reextract_splits,
+            collect_splits=collect_splits,
             hidden_state_extractor=hidden_state_extractor,
             nli_scorer=nli_scorer,
         )
