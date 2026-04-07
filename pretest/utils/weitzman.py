@@ -159,6 +159,92 @@ def compute_all_reservation_values(
     return reservation_values
 
 
+def _proxy_scalar(step_data: dict, quality_key: str) -> float:
+    """从单步轨迹字典读取部署可见的代理质量标量（缺省为 0）。"""
+    return float(step_data.get(quality_key, 0.0) or 0.0)
+
+
+def compute_all_reservation_values_from_proxy(
+    trajectories: List[dict],
+    max_k: int,
+    cost: float,
+    quality_key: str = "self_consistency",
+    *,
+    brentq_bounds: Tuple[float, float] = (-1.0, 1.0),
+) -> Dict[int, float]:
+    """
+    Deployable-GW：在训练集上用代理质量（如 self_consistency）的步间增益估计 r_k*，
+    形式与 F1 版 `compute_all_reservation_values` 相同，仅将 Q(s_k) 从 f1 换为可部署信号。
+
+    增益：G_k = proxy(s_k) - proxy(s_{k-1})，第一步的上一步代理视为 0。
+    """
+    gains_by_step: Dict[int, List[float]] = {k: [] for k in range(1, max_k + 1)}
+
+    for traj in trajectories:
+        steps = sorted(traj.get("steps") or [], key=lambda x: int(x["step"]))
+        prev_proxy = 0.0
+        for step_data in steps:
+            k = int(step_data["step"])
+            if k < 1 or k > max_k:
+                continue
+            curr = _proxy_scalar(step_data, quality_key)
+            gain = curr - prev_proxy
+            gains_by_step[k].append(gain)
+            prev_proxy = curr
+
+    reservation_values: Dict[int, float] = {}
+    for k in range(1, max_k + 1):
+        gains = gains_by_step[k]
+        if not gains:
+            reservation_values[k] = 0.0
+            continue
+        r_star = compute_reservation_value(gains, cost, bounds=brentq_bounds)
+        reservation_values[k] = r_star if r_star is not None else 0.0
+        logger.info(
+            "Deployable-GW [%s] step %d: n=%d, mean_gain=%.4f, r*=%.4f",
+            quality_key,
+            k,
+            len(gains),
+            float(np.mean(gains)),
+            reservation_values[k],
+        )
+
+    return reservation_values
+
+
+def deployable_weitzman_stopping_simulation(
+    trajectories: List[dict],
+    reservation_values: Dict[int, float],
+    max_k: int,
+    quality_key: str = "self_consistency",
+) -> List[dict]:
+    """
+    Deployable-GW 停止模拟：用代理质量与 train 上估计的 r_{k+1}* 比较决定是否停止；
+    汇报的 f1 / em 仍为该步的真实答案指标（用于与 Probe 公平比质量，停止规则不偷看 GT）。
+    """
+    results: List[dict] = []
+    for traj in trajectories:
+        steps = sorted(traj.get("steps") or [], key=lambda x: int(x["step"]))
+        final_f1, final_em, steps_used = 0.0, False, 0
+
+        for step_data in steps:
+            k = int(step_data["step"])
+            if k < 1 or k > max_k:
+                continue
+            curr_proxy = _proxy_scalar(step_data, quality_key)
+            curr_f1 = float(step_data.get("f1", 0.0) or 0.0)
+            curr_em = bool(step_data.get("em", False))
+            steps_used = k
+
+            next_r = reservation_values.get(k + 1, -999.0) if k < max_k else -999.0
+            if curr_proxy >= next_r or k == max_k:
+                final_f1, final_em = curr_f1, curr_em
+                break
+
+        results.append({"f1": final_f1, "em": final_em, "steps_used": steps_used})
+    return results
+
+
 def oracle_stopping_simulation(
     trajectories: List[dict],
     reservation_values: Dict[int, float],

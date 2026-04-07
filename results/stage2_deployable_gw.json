@@ -1,0 +1,94 @@
+{
+  "quality_key": "self_consistency",
+  "cost_per_step": 0.05,
+  "max_k": 5,
+  "datasets": {
+    "hotpotqa": {
+      "deployable_gw": {
+        "strategy": "Deployable-GW",
+        "avg_steps": 1.013,
+        "avg_cost": 0.05065000000000001,
+        "avg_f1": 0.36978449999999996,
+        "avg_em": 0.278
+      },
+      "reservation_values": {
+        "1": 0.8933113518605746,
+        "2": 0.17201735357917572,
+        "3": 0.07071984435797665,
+        "4": 0.0565597667638484,
+        "5": 0.011122742301946268
+      },
+      "comparison_from_probe_table": {
+        "probe_table_path": "results/stage2_probe_table_hotpotqa.csv",
+        "probe": {
+          "avg_f1": 0.5256478,
+          "avg_steps": 2.892,
+          "avg_cost": 0.1446
+        },
+        "global_weitzman": {
+          "avg_f1": 0.6088935,
+          "avg_steps": 2.819,
+          "avg_cost": 0.14095
+        }
+      }
+    },
+    "musique": {
+      "deployable_gw": {
+        "strategy": "Deployable-GW",
+        "avg_steps": 1.0479616306954436,
+        "avg_cost": 0.052398081534772184,
+        "avg_f1": 0.09071462829736211,
+        "avg_em": 0.05275779376498801
+      },
+      "reservation_values": {
+        "1": 0.822016936104696,
+        "2": 0.19598130841121492,
+        "3": 0.14752663010205017,
+        "4": 0.10647640094213989,
+        "5": 0.08879941434846265
+      },
+      "comparison_from_probe_table": {
+        "probe_table_path": "results/stage2_probe_table_musique.csv",
+        "probe": {
+          "avg_f1": 0.1785026378896882,
+          "avg_steps": 3.513189448441247,
+          "avg_cost": 0.1756594724220623
+        },
+        "global_weitzman": {
+          "avg_f1": 0.2235172661870504,
+          "avg_steps": 4.091127098321343,
+          "avg_cost": 0.2045563549160671
+        }
+      }
+    },
+    "2wiki": {
+      "deployable_gw": {
+        "strategy": "Deployable-GW",
+        "avg_steps": 1.005,
+        "avg_cost": 0.05025000000000002,
+        "avg_f1": 0.22230679999999997,
+        "avg_em": 0.188
+      },
+      "reservation_values": {
+        "1": 0.836731843575419,
+        "2": 0.15915221579961464,
+        "3": 0.11832146756230455,
+        "4": 0.09951287404314545,
+        "5": 0.08037653874004344
+      },
+      "comparison_from_probe_table": {
+        "probe_table_path": "results/stage2_probe_table_2wiki.csv",
+        "probe": {
+          "avg_f1": 0.3579994,
+          "avg_steps": 3.109,
+          "avg_cost": 0.15545
+        },
+        "global_weitzman": {
+          "avg_f1": 0.5121131,
+          "avg_steps": 3.471,
+          "avg_cost": 0.17355
+        }
+      }
+    }
+  }
+}
