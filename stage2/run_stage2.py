@@ -9,6 +9,7 @@ Covers:
 
 Usage:
   python -m stage2.run_stage2 --datasets hotpotqa,musique,2wiki --max-k 5
+  （汇总报告写入 docs/stage2_report.md；CSV/PNG 仍在 results/。）
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import math
 import random
 import re
@@ -43,13 +45,15 @@ from pretest.utils.weitzman import (
 
 LOGGER = logging.getLogger(__name__)
 
-# 9 维基础 + 5 维步间差分 + cumulative_cost_ratio + Phase D4 答案/检索代理（3）
-SHALLOW_FEATURE_DIM = 18
+# 11 维基础（新增 answer_logprob/self_eval_score）+ 5 维步间差分 + cumulative_cost_ratio + Phase D4 答案/检索代理（3）
+SHALLOW_FEATURE_DIM = 20
 SHALLOW_FEATURE_NAMES: Tuple[str, ...] = (
     "k_norm",
     "retrieval_score",
     "semantic_entropy",
     "self_consistency",
+    "answer_logprob",
+    "self_eval_score",
     "ctx_overlap",
     "nli_entail",
     "nli_contra",
@@ -119,6 +123,10 @@ class Stage2Config:
     @property
     def results_dir(self) -> Path:
         return self.root_dir / "results"
+
+    @property
+    def docs_dir(self) -> Path:
+        return self.root_dir / "docs"
 
 
 class ProbeDataset(Dataset):
@@ -224,6 +232,7 @@ def _set_seed(seed: int) -> None:
 
 def _ensure_dirs(cfg: Stage2Config, datasets: Sequence[str]) -> None:
     cfg.results_dir.mkdir(parents=True, exist_ok=True)
+    cfg.docs_dir.mkdir(parents=True, exist_ok=True)
     cfg.artifacts_probe_dir.mkdir(parents=True, exist_ok=True)
     for ds in datasets:
         (cfg.artifacts_probe_dir / ds).mkdir(parents=True, exist_ok=True)
@@ -465,6 +474,8 @@ def _step_shallow_features(
         float(step.get("retrieval_score", 0.0) or 0.0),
         float(step.get("semantic_entropy", 0.0) or 0.0),
         float(step.get("self_consistency", 0.0) or 0.0),
+        float(step.get("answer_logprob", 0.0) or 0.0),
+        float(step.get("self_eval_score", 0.0) or 0.0),
         float(step.get("ctx_overlap", 0.0) or 0.0),
         float(step.get("nli_entail", 0.0) or 0.0),
         float(step.get("nli_contra", 0.0) or 0.0),
@@ -1501,9 +1512,20 @@ def run_dataset_stage2(cfg: Stage2Config, dataset: str) -> Dict[str, Any]:
     }
 
 
+def _artifact_href_for_doc(out_md: Path, artifact_str: str, repo_root: Path) -> str:
+    """Markdown 写在 docs/ 下时，把仓库内路径转成相对该 .md 文件的路径。"""
+    ap = Path(artifact_str)
+    full = ap.resolve() if ap.is_absolute() else (repo_root / ap).resolve()
+    return os.path.relpath(str(full), start=str(out_md.parent.resolve()))
+
+
 def build_stage2_report(
-    results: Dict[str, Dict[str, Any]], out_path: Path, title_suffix: str = ""
+    results: Dict[str, Dict[str, Any]],
+    out_path: Path,
+    title_suffix: str = "",
+    repo_root: Optional[Path] = None,
 ) -> Path:
+    root = (repo_root or out_path.parent.parent).resolve()
     lines: List[str] = []
     lines.append("# Stage2 Report" + (f" ({title_suffix})" if title_suffix else ""))
     lines.append("")
@@ -1530,8 +1552,9 @@ def build_stage2_report(
     lines.append("")
     for ds, info in results.items():
         lines.append(
-            f"- `{ds}`: table=`{info['table_path']}`, pareto=`{info['pareto_path']}`, "
-            f"model=`{info['model_path']}`"
+            f"- `{ds}`: table=`{_artifact_href_for_doc(out_path, info['table_path'], root)}`, "
+            f"pareto=`{_artifact_href_for_doc(out_path, info['pareto_path'], root)}`, "
+            f"model=`{_artifact_href_for_doc(out_path, info['model_path'], root)}`"
         )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1702,7 +1725,10 @@ def main() -> None:
     if cfg.artifact_suffix.strip() and not cfg.shallow_only:
         report_title = (report_title + f" ({cfg.artifact_suffix.strip()})").strip()
     report_path = build_stage2_report(
-        all_results, cfg.results_dir / report_name, title_suffix=report_title
+        all_results,
+        cfg.docs_dir / report_name,
+        title_suffix=report_title,
+        repo_root=cfg.root_dir.resolve(),
     )
     LOGGER.info("Stage2 complete. Report: %s", report_path)
     for ds in datasets:

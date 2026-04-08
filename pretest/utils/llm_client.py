@@ -25,6 +25,25 @@ ANSWER_PROMPT = """\
 
 答案："""
 
+SELF_EVAL_PROMPT = """\
+你是答案质量评审器。请根据问题、上下文和候选答案，给出 1 到 5 的整数分数：
+- 1 = 明显错误或无关
+- 2 = 大概率错误
+- 3 = 部分正确/不完整
+- 4 = 基本正确
+- 5 = 高度正确且完整
+
+只输出一个数字（1/2/3/4/5），不要输出其他文本。
+
+问题：{question}
+
+已检索上下文：
+{context}
+
+候选答案：{answer}
+
+评分："""
+
 
 class LLMClient:
     def __init__(self, config):
@@ -125,7 +144,8 @@ class LLMClient:
     ) -> Tuple[List[str], Dict[str, float]]:
         """
         单次请求生成 n 个完成（Pass 1 语义熵 / 自一致性），与 Stage1 的 temperature、n 对齐。
-        返回 (answers, meta)，meta 含 token_count（近似每完成一次）、latency_ms。
+        返回 (answers, meta)，meta 含 token_count（近似每完成一次）、latency_ms、answer_logprob。
+        其中 answer_logprob 对应首个采样答案（通常即 Stage1 当前答案）的平均 token logprob。
         """
         prompt = ANSWER_PROMPT.format(question=question, context=context)
         n = max(1, int(n))
@@ -146,7 +166,7 @@ class LLMClient:
                     out.append(" ".join(shuffled[:k]))
             lat = (time.perf_counter() - t0) * 1000.0
             tc = max(1, sum(len(a.split()) for a in out) // n)
-            return out, {"token_count": float(tc), "latency_ms": lat}
+            return out, {"token_count": float(tc), "latency_ms": lat, "answer_logprob": -1.0}
 
         try:
             kwargs = dict(
@@ -155,38 +175,46 @@ class LLMClient:
                 max_tokens=self.cfg.max_tokens,
                 temperature=float(temperature),
                 n=n,
+                logprobs=True,
+                top_logprobs=5,
             )
             try:
                 response = self._client.chat.completions.create(**kwargs)
             except Exception as e_inner:
                 logger.warning(
-                    "批量 n=%d 请求失败（%s），改为逐条采样。",
+                    "批量 n=%d 请求失败（%s），先改无 logprobs 重试，再回退逐条采样。",
                     n,
                     e_inner,
                 )
-                texts: List[str] = []
-                tok_sum = 0
-                for _ in range(n):
-                    one = self._client.chat.completions.create(
-                        model=self.cfg.model_name,
-                        messages=[{"role": "user", "content": prompt}],
-                        max_tokens=self.cfg.max_tokens,
-                        temperature=float(temperature),
-                    )
-                    texts.append((one.choices[0].message.content or "").strip())
-                    u = getattr(one, "usage", None)
-                    if u is not None and getattr(u, "completion_tokens", None):
-                        tok_sum += int(u.completion_tokens)
-                lat = (time.perf_counter() - t0) * 1000.0
-                tc = tok_sum / max(1, n) if tok_sum else float(len(texts[0].split()) if texts else 1)
-                return texts, {"token_count": tc, "latency_ms": lat}
+                try:
+                    kwargs.pop("logprobs", None)
+                    kwargs.pop("top_logprobs", None)
+                    response = self._client.chat.completions.create(**kwargs)
+                except Exception:
+                    texts = []
+                    tok_sum = 0
+                    for _ in range(n):
+                        one = self._client.chat.completions.create(
+                            model=self.cfg.model_name,
+                            messages=[{"role": "user", "content": prompt}],
+                            max_tokens=self.cfg.max_tokens,
+                            temperature=float(temperature),
+                        )
+                        texts.append((one.choices[0].message.content or "").strip())
+                        u = getattr(one, "usage", None)
+                        if u is not None and getattr(u, "completion_tokens", None):
+                            tok_sum += int(u.completion_tokens)
+                    lat = (time.perf_counter() - t0) * 1000.0
+                    tc = tok_sum / max(1, n) if tok_sum else float(len(texts[0].split()) if texts else 1)
+                    return texts, {"token_count": tc, "latency_ms": lat, "answer_logprob": 0.0}
 
             texts = [(c.message.content or "").strip() for c in response.choices]
             u = getattr(response, "usage", None)
             ct = int(getattr(u, "completion_tokens", 0) or 0) if u is not None else 0
             tc = (ct / float(n)) if ct > 0 else float(len(texts[0].split()) if texts else 1)
+            first_logprob = self._extract_mean_logprob_from_choice(response.choices[0]) if texts else 0.0
             lat = (time.perf_counter() - t0) * 1000.0
-            return texts, {"token_count": tc, "latency_ms": lat}
+            return texts, {"token_count": tc, "latency_ms": lat, "answer_logprob": first_logprob}
         except Exception as e:
             logger.error("generate_n 失败：%s，降级为 mock。", e)
             base = self._mock_generate(context)["answer"]
@@ -203,7 +231,43 @@ class LLMClient:
                     out.append(" ".join(shuffled[:k]))
             lat = (time.perf_counter() - t0) * 1000.0
             tc = max(1, sum(len(a.split()) for a in out) // n)
-            return out, {"token_count": float(tc), "latency_ms": lat}
+            return out, {"token_count": float(tc), "latency_ms": lat, "answer_logprob": -1.0}
+
+    def self_evaluate_score(self, question: str, context: str, answer: str) -> float:
+        """让模型对当前答案打 1~5 分；失败时返回 0。"""
+        if self._mock:
+            return 0.0
+        prompt = SELF_EVAL_PROMPT.format(
+            question=question,
+            context=context,
+            answer=answer,
+        )
+        try:
+            response = self._client.chat.completions.create(
+                model=self.cfg.model_name,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=8,
+                temperature=0.0,
+            )
+            text = (response.choices[0].message.content or "").strip()
+            m = None
+            if text:
+                import re
+
+                m = re.search(r"([1-5])", text)
+            if not m:
+                return 0.0
+            return float(int(m.group(1)))
+        except Exception as e:
+            logger.warning("self_evaluate_score 调用失败：%s", e)
+            return 0.0
+
+    # ──────────────────────────────────────────────────────────
+    @staticmethod
+    def _extract_mean_logprob_from_choice(choice) -> float:
+        lp_obj = getattr(choice, "logprobs", None)
+        mean_lp, _, _ = LLMClient._extract_features(lp_obj)
+        return float(mean_lp)
 
     # ──────────────────────────────────────────────────────────
     @staticmethod

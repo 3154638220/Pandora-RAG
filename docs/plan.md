@@ -1,7 +1,7 @@
 # Pandora-RAG Stage 2 攻坚计划
 
 > 最后更新：2026-04-07
-> 当前状态：优先级 1–5 的 Phase A+B+C 均已落地。**Probe 与公平基线 Deployable-GW 对比：三数据集 test F1 均更高**（见下「Deployable-GW 全量验收记录」）；与 **Original-GW（半 Oracle）** 相比仍落后——后者在 test 上使用真实 F1 停止，**不作公平胜负判定**。经深度诊断后发现核心瓶颈并非训练技巧，而是 **若误用 Original-GW 作对手则对比不公平 + 特征信号缺失**。**Phase D2（XGBoost 同特征基线）已跑完**：三数据集上 XGB 均未明显优于 MLP，**与「特征是主瓶颈」一致**。**D3 损失消融已跑完**（见 Phase D3 全量验收记录；与默认 `run_stage2` 均在 **18 维浅层含 D4×3** 的同一代码快照下完成，故 **D4 全量重训已包含在内**）。**D5 方案 B：Deployable-GW 已落地**（train 上用 `self_consistency` 步间增益估 r_k^，test 上按代理停止、汇报真实 F1；见下「Deployable-GW 全量验收记录」）。Phase C 阈值锚点仍为 **Original-GW(dev) 步数**（未改）。下一步：若需统一由 `run_stage2` 刷新带 Deployable-GW 行的 CSV/Pareto，可再跑全量；或推进 D6 / 论文叙事。
+> 当前状态：优先级 1–5 的 Phase A+B+C 均已落地。**Probe 与公平基线 Deployable-GW 对比：三数据集 test F1 均更高**（见下「Deployable-GW 全量验收记录」）；与 **Original-GW（半 Oracle）** 相比仍落后——后者在 test 上使用真实 F1 停止，**不作公平胜负判定**。经深度诊断后发现核心瓶颈并非训练技巧，而是 **若误用 Original-GW 作对手则对比不公平 + 特征信号缺失**。**Phase D2（XGBoost 同特征基线）已跑完**：三数据集上 XGB 均未明显优于 MLP，**与「特征是主瓶颈」一致**。**D3 损失消融已跑完**（见 Phase D3 全量验收记录；与默认 `run_stage2` 均在 **18 维浅层含 D4×3** 的同一代码快照下完成，故 **D4 全量重训已包含在内**）。**D1 特征诊断已按当前 18 维全量重刷**（2026-04-07，`stage2_feature_diagnostic.md` 含 D4×3；旧版报告仅列 15 维，已作废）。**D5 方案 B：Deployable-GW 已落地**（train 上用 `self_consistency` 步间增益估 r_k^，test 上按代理停止、汇报真实 F1；见下「Deployable-GW 全量验收记录」）。Phase C 阈值锚点仍为 **Original-GW(dev) 步数**（未改）。**下一步（效果）**：优先在 Stage1 侧补 `**answer_logprob` 系列**（建议 mean / min / delta 一并落盘），再视增益考虑 `self_eval_score`；详见 `stage2_next_steps_analysis.md` 与下节 D1/D4。若需刷新带 Deployable-GW 行的 CSV/Pareto 可再跑全量 `run_stage2`；或推进 D6 / 论文叙事。
 
 ---
 
@@ -10,14 +10,14 @@
 ### Probe vs Deployable-GW（公平对比；Original-GW 仅参照）
 
 
-| 数据集      | Probe F1 | Deployable-GW F1 | Probe 步数 | D-GW 步数 | Original-GW F1（参照） | Original-GW 步数 | Oracle F1 | Orig-GW/Oracle |
-| -------- | -------- | ---------------- | -------- | ------- | --------------------- | ---------------- | --------- | -------------- |
-| hotpotqa | **0.5244** | 0.3698           | 2.74     | 1.01    | 0.6089                | 2.819            | 0.6283    | 96.9%          |
-| musique  | **0.1659** | 0.0907           | 3.13     | 1.05    | 0.2235                | 4.091            | 0.2430    | 92.0%          |
-| 2wiki    | **0.3606** | 0.2223           | 2.71     | 1.01    | 0.5121                | 3.471            | 0.5264    | 97.3%          |
+| 数据集      | Probe F1   | Deployable-GW F1 | Probe 步数 | D-GW 步数 | Original-GW F1（参照） | Original-GW 步数 | Oracle F1 | Orig-GW/Oracle |
+| -------- | ---------- | ---------------- | -------- | ------- | ------------------ | -------------- | --------- | -------------- |
+| hotpotqa | **0.5244** | 0.3698           | 2.74     | 1.01    | 0.6089             | 2.819          | 0.6283    | 96.9%          |
+| musique  | **0.1659** | 0.0907           | 3.13     | 1.05    | 0.2235             | 4.091          | 0.2430    | 92.0%          |
+| 2wiki    | **0.3606** | 0.2223           | 2.71     | 1.01    | 0.5121             | 3.471          | 0.5264    | 97.3%          |
+
 
 > Deployable-GW 数字来自 `python -m stage2.run_deployable_gw_eval`（与 D5 节一致）；**各阶段 Probe 的公平胜负判定以 vs Deployable-GW 为准**，Original-GW 保留为上界参照。
-
 
 ### 训练动态分析
 
@@ -53,10 +53,11 @@ Original-GW 达到 Oracle 的 **92–97%**，因为它们同属「真实 F1 可�
 
 #### 根因 2：特征集缺少「答案质量」的直接代理
 
-Oracle 的 `action_label` 取决于 "当前 F1 够不够好 + 继续能改善多少"。当前 15 维浅层特征中：
+Oracle 的 `action_label` 取决于 "当前 F1 够不够好 + 继续能改善多少"。当前 **18 维**浅层（含 D4：`answer_changed`、`answer_consistency_streak_norm`、`retrieval_marginal_novelty`）中：
 
-- `self_consistency`、`semantic_entropy` 是答案质量的 **间接代理**，但相关性弱
-- **完全缺失的关键信号**：(a) 答案 token 级 log-probability（反映模型自信度）；(b) 答案在步间是否发生变化（稳定 = 可能已收敛）；(c) 自评分数（让 LLM 评价自身答案质量）
+- `self_consistency`、`semantic_entropy` 仍是答案质量的 **间接代理**，单变量 AUROC 仍多偏弱（见 D1 重刷报告）
+- D4 低成本三项已接入；**单变量上** `retrieval_marginal_novelty` 在三数据集上略强于多数旧浅层，`answer_changed` 在 hotpotqa 略有用、在 musique/2wiki 很弱，`answer_consistency_streak_norm` 多呈负相关（AUROC < 0.5）
+- **仍缺失的高价值信号**：(a) 答案 token 级 log-probability（`answer_logprob`，**下一优先**）；(b) 自评分数 `self_eval_score`（额外推理成本更高）
 - Hidden states 4096 维理论上包含答案信息，但 ProbeMLP_v2 未能有效提取——可能因为降维过于激进（4096→64）
 
 #### 根因 3：训练噪声 > 可学信号
@@ -80,7 +81,7 @@ Oracle 的 `action_label` 取决于 "当前 F1 够不够好 + 继续能改善多
 
 ## 优先级 1：跑通极简基线（Shallow-Only） ✅ 已完成
 
-- **产出**：`results/stage2_report_shallow.md`，三数据集 shallow-only 对照数据已入库。
+- **产出**：`stage2_report_shallow.md`，三数据集 shallow-only 对照数据已入库。
 - **结论**：Shallow-Only 几乎等于 best Fixed-K（gain ≈ 0），验证了浅层特征单独不足以学到有效停止策略，为论文 "w/o Deep Features" 消融提供了数据支撑。
 
 ---
@@ -99,7 +100,7 @@ Oracle 的 `action_label` 取决于 "当前 F1 够不够好 + 继续能改善多
 
 **已落地**：`stage2/run_stage2.py` 中新增 `ProbeMLP_v2`（LayerNorm + 4096→compress、浅层独立分支、GELU 融合分类头）；`ProbeDataset` / `_build_xyw` / `_train_probe` / `_predict_probs` / `_precompute_probe_probs` 已改为浅层与 hidden 双张量管线；浅层仍为 `StandardScaler`，hidden 仅经模型内 `LayerNorm`。`Stage2Config` 增加 `compress_dim`（默认 64）、`fuse_dim`（默认 128）。checkpoint 含 `probe_arch`（`mlp` / `mlp_v2`）。`--shallow-only` 路径仍使用原 `ProbeMLP`。
 
-**复现实验**：`python -m stage2.run_stage2 --datasets hotpotqa,musique,2wiki` → `results/stage2_report.md`、`results/stage2_probe_table_{dataset}.csv`、`artifacts/probe/{dataset}/stage2_train_meta.json`。
+**复现实验**：`python -m stage2.run_stage2 --datasets hotpotqa,musique,2wiki` → `stage2_report.md`、`../results/stage2_probe_table_{dataset}.csv`、`../artifacts/probe/{dataset}/stage2_train_meta.json`。
 
 ### 具体改动（`stage2/run_stage2.py`）— 设计说明（已实现）
 
@@ -174,21 +175,21 @@ class ProbeMLP_v2(nn.Module):
 **与上述三条标准的对照**：
 
 
-| 验收项                                           | 结论           | 说明                                                                                                                                 |
-| --------------------------------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
-| Dev loss 前 10 epoch 单调下降                      | **未通过**      | 三数据集均出现 epoch 间 dev_loss 回升（如 hotpotqa：1→2 上升；musique：2→3 上升）。                                                                     |
-| Dev [accuracy@0.5](mailto:accuracy@0.5) > 65% | **未通过**      | hotpotqa **58.23%**，musique **62.55%**，2wiki **56.75%**（`artifacts/probe/*/stage2_train_meta.json` → `train_info.dev_acc_at_0.5`）。 |
-| Probe F1 ≥2/3 数据集超过 Deployable-GW（公平基线）     | **通过（3/3）**   | 下表：Probe F1 均高于同表 Deployable-GW F1。                                                                                              |
+| 验收项                                           | 结论          | 说明                                                                                                                                    |
+| --------------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Dev loss 前 10 epoch 单调下降                      | **未通过**     | 三数据集均出现 epoch 间 dev_loss 回升（如 hotpotqa：1→2 上升；musique：2→3 上升）。                                                                        |
+| Dev [accuracy@0.5](mailto:accuracy@0.5) > 65% | **未通过**     | hotpotqa **58.23%**，musique **62.55%**，2wiki **56.75%**（`../artifacts/probe/*/stage2_train_meta.json` → `train_info.dev_acc_at_0.5`）。 |
+| Probe F1 ≥2/3 数据集超过 Deployable-GW（公平基线）       | **通过（3/3）** | 下表：Probe F1 均高于同表 Deployable-GW F1。                                                                                                   |
 
 
-**Test：Probe vs Deployable-GW（公平）+ Original-GW（参照）**（Probe 来自 `results/stage2_probe_table_*.csv`；D-GW 同 D5 评估）：
+**Test：Probe vs Deployable-GW（公平）+ Original-GW（参照）**（Probe 来自 `../results/stage2_probe_table_*.csv`；D-GW 同 D5 评估）：
 
 
-| 数据集      | Probe F1 | Deployable-GW F1 | Probe 步数 | D-GW 步数 | Original-GW F1（参照） | Original-GW 步数 |
-| -------- | -------- | ---------------- | -------- | ------- | --------------------- | ---------------- |
-| hotpotqa | **0.5270** | 0.3698           | 3.444    | 1.01    | 0.6089                | 2.819            |
-| musique  | **0.1556** | 0.0907           | 4.305    | 1.05    | 0.2235                | 4.091            |
-| 2wiki    | **0.3757** | 0.2223           | 4.361    | 1.01    | 0.5121                | 3.471            |
+| 数据集      | Probe F1   | Deployable-GW F1 | Probe 步数 | D-GW 步数 | Original-GW F1（参照） | Original-GW 步数 |
+| -------- | ---------- | ---------------- | -------- | ------- | ------------------ | -------------- |
+| hotpotqa | **0.5270** | 0.3698           | 3.444    | 1.01    | 0.6089             | 2.819          |
+| musique  | **0.1556** | 0.0907           | 4.305    | 1.05    | 0.2235             | 4.091          |
+| 2wiki    | **0.3757** | 0.2223           | 4.361    | 1.01    | 0.5121             | 3.471          |
 
 
 **小结**：双分支缓解了实现层面的模态尺度问题，但**仍未达到计划中的 dev 稳定性 / 分类准确率**；**相对公平基线 Deployable-GW，Probe test F1 三数据集均更高**。与 Original-GW（半 Oracle）相比仍落后，属预期。下一步按优先级 4、5 推进。
@@ -199,7 +200,7 @@ class ProbeMLP_v2(nn.Module):
 
 **目标：显式编码步间趋势，降低模型学习难度。**
 
-**已落地**：`stage2/run_stage2.py` 中 `SHALLOW_FEATURE_DIM=15`；`_delta_source_scalars`、`_shallow_row_for_step`、`_trajectory_max_cumulative_cost`；`_build_xyw` / `_build_step_feature_map` 按轨迹内 `steps_by_k` 对齐 k−1 与 k 计算 5 维 delta 与 `cumulative_cost_ratio`；`run_dataset_stage2` 打印 dev 上扩展维 StandardScaler 前的 std 便于验收。
+**已落地**：`stage2/run_stage2.py` 中 `_delta_source_scalars`、`_shallow_row_for_step`、`_trajectory_max_cumulative_cost`；`_build_xyw` / `_build_step_feature_map` 按轨迹内 `steps_by_k` 对齐 k−1 与 k 计算 5 维 delta 与 `cumulative_cost_ratio`；差分合入后浅层为 **15 维**，**后续 D4 再 +3 维，当前 `SHALLOW_FEATURE_DIM=18`**（见 Phase D 节）；`run_dataset_stage2` 打印 dev 上扩展维 StandardScaler 前的 std 便于验收。
 
 ### 具体改动
 
@@ -229,7 +230,7 @@ class ProbeMLP_v2(nn.Module):
 
 ### 全量验收记录（2026-04-06）
 
-**命令**：`python -m stage2.run_stage2 --datasets hotpotqa,musique,2wiki`（默认超参；`ProbeMLP_v2` + 15 维浅层）。
+**命令**：`python -m stage2.run_stage2 --datasets hotpotqa,musique,2wiki`（默认超参；`ProbeMLP_v2`；本表验收针对 **Delta 后 15 维** 快照；**当前默认代码为 18 维含 D4**，见 D4 节）。
 
 
 | 验收项                               | 结论      | 说明                                                                                                                            |
@@ -251,14 +252,14 @@ class ProbeMLP_v2(nn.Module):
 **Test：Probe vs Deployable-GW（公平）+ Original-GW（参照）**：
 
 
-| 数据集      | Probe F1 | Deployable-GW F1 | Probe 步数 | D-GW 步数 | Original-GW F1（参照） | Original-GW 步数 |
-| -------- | -------- | ---------------- | -------- | ------- | --------------------- | ---------------- |
-| hotpotqa | **0.5254** | 0.3698           | 3.228    | 1.01    | 0.6089                | 2.819            |
-| musique  | **0.1592** | 0.0907           | 4.609    | 1.05    | 0.2235                | 4.091            |
-| 2wiki    | **0.3748** | 0.2223           | 4.269    | 1.01    | 0.5121                | 3.471            |
+| 数据集      | Probe F1   | Deployable-GW F1 | Probe 步数 | D-GW 步数 | Original-GW F1（参照） | Original-GW 步数 |
+| -------- | ---------- | ---------------- | -------- | ------- | ------------------ | -------------- |
+| hotpotqa | **0.5254** | 0.3698           | 3.228    | 1.01    | 0.6089             | 2.819          |
+| musique  | **0.1592** | 0.0907           | 4.609    | 1.05    | 0.2235             | 4.091          |
+| 2wiki    | **0.3748** | 0.2223           | 4.269    | 1.01    | 0.5121             | 3.471          |
 
 
-**Dev [accuracy@0.5](mailto:accuracy@0.5)**（`artifacts/probe/*/stage2_train_meta.json`）：hotpotqa **66.10%**，musique **58.55%**，2wiki **49.03%**（2wiki 仍偏低；与优先级 3 相比 hotpotqa 提升、2wiki 下降，与 F1 波动一致）。
+**Dev [accuracy@0.5](mailto:accuracy@0.5)**（`../artifacts/probe/*/stage2_train_meta.json`）：hotpotqa **66.10%**，musique **58.55%**，2wiki **49.03%**（2wiki 仍偏低；与优先级 3 相比 hotpotqa 提升、2wiki 下降，与 F1 波动一致）。
 
 **小结**：Delta 特征在统计上有效且已实现端到端，但**未带来稳定的 test F1 增益**；**相对 Deployable-GW，Probe 仍全面更高**；相对 Original-GW 仍落后（参照）。下一步优先推进**优先级 5**（LR 调度、正则与阈值策略）。
 
@@ -309,16 +310,16 @@ torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
 **相对优先级 4（Delta 默认超参）test Probe F1**：hotpotqa 0.5254→**0.5271**（+0.0017）；musique 0.1592→**0.1687**（+0.0095）；2wiki 0.3748→**0.3824**（+0.0076）。
 
-**Dev [Acc@0.5*](mailto:Acc@0.5)*（`artifacts/probe/*/stage2_train_meta.json`）：hotpotqa 66.10%→**62.88%**（降）；musique 58.55%→**52.80%**（降）；2wiki 49.03%→**54.30%**（升）。与计划中的「三数据集 ≥65%」仍有差距；**早停仍多在 warmup 结束后的数个 epoch 内触发**（best epoch 多为 3–5），末 epoch 的 train/dev 间隙仍大，需 Phase B/C 继续压过拟合与校准决策。
+**Dev [Acc@0.5*](mailto:Acc@0.5)*（`../artifacts/probe/*/stage2_train_meta.json`）：hotpotqa 66.10%→**62.88%**（降）；musique 58.55%→**52.80%**（降）；2wiki 49.03%→**54.30%**（升）。与计划中的「三数据集 ≥65%」仍有差距；**早停仍多在 warmup 结束后的数个 epoch 内触发**（best epoch 多为 3–5），末 epoch 的 train/dev 间隙仍大，需 Phase B/C 继续压过拟合与校准决策。
 
 **Test：Probe vs Deployable-GW（公平）+ Original-GW（参照）**：
 
 
-| 数据集      | Probe F1 | Deployable-GW F1 | Probe 步数 | D-GW 步数 | Original-GW F1（参照） | Original-GW 步数 |
-| -------- | -------- | ---------------- | -------- | ------- | --------------------- | ---------------- |
-| hotpotqa | **0.5271** | 0.3698           | 3.294    | 1.01    | 0.6089                | 2.819            |
-| musique  | **0.1687** | 0.0907           | 3.957    | 1.05    | 0.2235                | 4.091            |
-| 2wiki    | **0.3824** | 0.2223           | 4.439    | 1.01    | 0.5121                | 3.471            |
+| 数据集      | Probe F1   | Deployable-GW F1 | Probe 步数 | D-GW 步数 | Original-GW F1（参照） | Original-GW 步数 |
+| -------- | ---------- | ---------------- | -------- | ------- | ------------------ | -------------- |
+| hotpotqa | **0.5271** | 0.3698           | 3.294    | 1.01    | 0.6089             | 2.819          |
+| musique  | **0.1687** | 0.0907           | 3.957    | 1.05    | 0.2235             | 4.091          |
+| 2wiki    | **0.3824** | 0.2223           | 4.439    | 1.01    | 0.5121             | 3.471          |
 
 
 **小结**：Phase A 达到「更低初始 LR + 更强正则 + 调度与梯度裁剪」的工程目标，**test F1 三数据集均有小幅改善**；**相对 Deployable-GW 仍全面更高**；相对 Original-GW 仍落后（参照）。dev 准确率未全面达标。Phase B 已接棒并完成全量重训（见下）。
@@ -362,18 +363,18 @@ y_smooth = y * (1 - 2 * epsilon) + epsilon  # epsilon=0.05
 
 **相对 Phase A（同命令、仅损失从加权 BCE 换为 Focal+平滑）test Probe F1**：hotpotqa 0.5271→**0.5247**（−0.0024）；musique 0.1687→**0.1432**（−0.0255）；2wiki 0.3824→**0.3728**（−0.0096）。
 
-**Dev [Acc@0.5*](mailto:Acc@0.5)*（`artifacts/probe/*/stage2_train_meta.json`）：hotpotqa 62.88%→**45.55%**；musique 52.80%→**24.30%**；2wiki 54.30%→**30.33%**。（该指标依赖 0.5 硬阈值，与 dev 上调优的停止阈值无关，但表明 **logit 校准在 0.5 处显著变差**，可能与 focal + smoothing 联合作用有关。）
+**Dev [Acc@0.5*](mailto:Acc@0.5)*（`../artifacts/probe/*/stage2_train_meta.json`）：hotpotqa 62.88%→**45.55%**；musique 52.80%→**24.30%**；2wiki 54.30%→**30.33%**。（该指标依赖 0.5 硬阈值，与 dev 上调优的停止阈值无关，但表明 **logit 校准在 0.5 处显著变差**，可能与 focal + smoothing 联合作用有关。）
 
 **Train/Dev 步级标签比例（日志）**：hotpotqa train stop **79.66%** / continue 20.34%；musique train stop **82.16%** / continue 17.84%；2wiki train stop **79.61%** / continue 20.39%（dev 比例同量级）。
 
 **Test：Probe vs Deployable-GW（公平）+ Original-GW（参照）**：
 
 
-| 数据集      | Probe F1 | Deployable-GW F1 | Probe 步数 | D-GW 步数 | Original-GW F1（参照） | Original-GW 步数 |
-| -------- | -------- | ---------------- | -------- | ------- | --------------------- | ---------------- |
-| hotpotqa | **0.5247** | 0.3698           | 3.526    | 1.01    | 0.6089                | 2.819            |
-| musique  | **0.1432** | 0.0907           | 4.177    | 1.05    | 0.2235                | 4.091            |
-| 2wiki    | **0.3728** | 0.2223           | 4.492    | 1.01    | 0.5121                | 3.471            |
+| 数据集      | Probe F1   | Deployable-GW F1 | Probe 步数 | D-GW 步数 | Original-GW F1（参照） | Original-GW 步数 |
+| -------- | ---------- | ---------------- | -------- | ------- | ------------------ | -------------- |
+| hotpotqa | **0.5247** | 0.3698           | 3.526    | 1.01    | 0.6089             | 2.819          |
+| musique  | **0.1432** | 0.0907           | 4.177    | 1.05    | 0.2235             | 4.091          |
+| 2wiki    | **0.3728** | 0.2223           | 4.492    | 1.01    | 0.5121             | 3.471          |
 
 
 **小结**：Phase B 工程目标已达成（Focal、平滑、日志），但**全量 test 未优于 Phase A**；**相对 Deployable-GW，Probe 仍全面更高**。若要以 F1 为主指标，建议下一迭代尝试：**降低 `label_smoothing`、固定 `--focal-alpha` 消融、或仅保留其一**，并推进 **Phase C** 改善阈值与成本。默认命令仍为 Phase A+B，若需复现 Phase A 损失需单独加开关或回退（当前 CLI 未暴露「纯 BCE」开关）。
@@ -404,16 +405,16 @@ score = F1 - lambda_cost * normalized_cost
 **Test：Probe vs Deployable-GW（公平）+ Original-GW（参照）**：
 
 
-| 数据集      | Probe F1 | Deployable-GW F1 | Probe 步数 | D-GW 步数 | Original-GW F1（参照） | Original-GW 步数 |
-| -------- | -------- | ---------------- | -------- | ------- | --------------------- | ---------------- |
-| hotpotqa | **0.5244** | 0.3698           | 2.743    | 1.01    | 0.6089                | 2.819            |
-| musique  | **0.1659** | 0.0907           | 3.127    | 1.05    | 0.2235                | 4.091            |
-| 2wiki    | **0.3606** | 0.2223           | 2.707    | 1.01    | 0.5121                | 3.471            |
+| 数据集      | Probe F1   | Deployable-GW F1 | Probe 步数 | D-GW 步数 | Original-GW F1（参照） | Original-GW 步数 |
+| -------- | ---------- | ---------------- | -------- | ------- | ------------------ | -------------- |
+| hotpotqa | **0.5244** | 0.3698           | 2.743    | 1.01    | 0.6089             | 2.819          |
+| musique  | **0.1659** | 0.0907           | 3.127    | 1.05    | 0.2235             | 4.091          |
+| 2wiki    | **0.3606** | 0.2223           | 2.707    | 1.01    | 0.5121             | 3.471          |
 
 
 **Dev 阈值侧（日志 / meta）**：三数据集均在 Original-GW(dev) 步数约束可行集内；本次运行 **chosen_λ 均为 0.1**，阈值约 **0.61–0.63**，dev 上 Probe **avg_steps** 相对 Phase B 明显降低（与 test 侧「更省步」一致）。
 
-**Dev [Acc@0.5*](mailto:Acc@0.5)*（`artifacts/probe/*/stage2_train_meta.json`；该指标依赖 0.5 硬阈值，与 dev 上选中的停止阈值无关）：hotpotqa **45.55%**，musique **24.30%**，2wiki **30.33%**。
+**Dev [Acc@0.5](mailto:Acc@0.5)**（`../artifacts/probe/*/stage2_train_meta.json`；该指标依赖 0.5 硬阈值，与 dev 上选中的停止阈值无关）：hotpotqa **45.55%**，musique **24.30%**，2wiki **30.33%**。
 
 **小结**：Phase C 达到「Pareto 分数 + Original-GW(dev) 步数上界」的工程目标；**test 上 Probe 平均步数与成本三数据集均不再高于 Original-GW**；musique F1 较 Phase B 明显改善，但 **hotpotqa / 2wiki F1 未升**。**公平对比下 Probe F1 仍高于 Deployable-GW**；与 Original-GW 的 F1 差距为半 Oracle 参照，不作「翻盘」判定。可继续调 λ 网格或放宽/收紧 `gw_steps_cap_mult` 做消融。
 
@@ -421,17 +422,29 @@ score = F1 - lambda_cost * normalized_cost
 
 > **核心策略转向**：不再以 **Original-GW** 为公平胜负线盲目调超参，而是 (1) 诊断特征 vs 模型哪个是瓶颈，(2) 补充关键缺失特征，(3) 以 **Deployable-GW** 为公平对比基线并保留 Original-GW 为参照。
 
-#### D1：特征-标签诊断（最高优先级）✅ 已完成
+#### D1：特征-标签诊断（最高优先级）✅ 已完成（18 维报告 2026-04-07 已刷新）
 
 **目的**：确认"特征是否能区分 Stop/Continue"——如果不能，再多训练技巧也无用。
 
 - 对 train 集，逐特征计算与 `action_label` 的 **point-biserial 相关系数** 和 **AUROC**
 - 对 hidden states（4096 维），用 PCA 降至 2D 后按 Stop/Continue 着色可视化
 - 分析 margin 分布：|margin| < 0.01 的"模糊样本"占比（这些样本的标签几乎是随机的）
-- **输出**：`results/stage2_feature_diagnostic.md` + `results/stage2_feature_diagnostic_pca_{dataset}.png`
+- **输出**：`stage2_feature_diagnostic.md` + `../results/stage2_feature_diagnostic_pca_{dataset}.png`
 - **命令**：`python -m stage2.run_feature_diagnostic --datasets hotpotqa,musique,2wiki`
 
-**预期**：若浅层特征 AUROC 均 < 0.60，说明特征信号不足，必须走 D4 补特征路线。
+**校准说明（2026-04-07）**：仓库中曾有一份 **仅列前 15 维** 的旧版 `stage2_feature_diagnostic.md`（D4 合入后未重跑诊断）。已用当前 `SHALLOW_FEATURE_NAMES`（18 维）**全量重刷**；PCA 图同步更新。执行顺序与解读汇总见 `stage2_next_steps_analysis.md`。
+
+**D4×3 单变量 AUROC（train，单特征 → 预测 Continue）** — 摘自重刷后的报告：
+
+
+| feature                          | hotpotqa | musique | 2wiki |
+| -------------------------------- | -------- | ------- | ----- |
+| `answer_changed`                 | 0.572    | 0.495   | 0.487 |
+| `answer_consistency_streak_norm` | 0.318    | 0.413   | 0.402 |
+| `retrieval_marginal_novelty`     | 0.591    | 0.575   | 0.599 |
+
+
+**预期**：若多数浅层特征 AUROC < 0.60，说明特征信号仍不足；D4 低成本线已有部分增量，**下一突破点宜为 Stage1 侧 `answer_logprob`**（见 D4 与 `stage2_next_steps_analysis.md`）。
 
 #### D2：GBDT 基线（分离特征 vs 模型问题）✅ 已完成（2026-04-06）
 
@@ -441,7 +454,7 @@ score = F1 - lambda_cost * normalized_cost
 - 超参搜索：`max_depth ∈ {4,6,8}`，`n_estimators ∈ {100,300,500}`，`learning_rate ∈ {0.05,0.1}`
 - 评估：同一 Phase C 阈值选择逻辑
 - **实现**：`stage2/run_xgboost_baseline.py`（`--xgb-device auto|cpu|cuda`）
-- **输出**：`results/stage2_xgboost_baseline.md`、`results/stage2_xgboost_baseline.json`
+- **输出**：`stage2_xgboost_baseline.md`、`../results/stage2_xgboost_baseline.json`
 
 **决策矩阵**：
 
@@ -455,16 +468,16 @@ score = F1 - lambda_cost * normalized_cost
 
 ### 全量验收记录（2026-04-06）
 
-**命令**：`python -m stage2.run_xgboost_baseline --datasets hotpotqa,musique,2wiki`（本机 `auto` → **XGBoost `device=cuda*`*；完整网格日志见 `results/stage2_xgboost_baseline.md`）。
+**命令**：`python -m stage2.run_xgboost_baseline --datasets hotpotqa,musique,2wiki`（本机 `auto` → **XGBoost `device=cuda`**；完整网格日志见 `stage2_xgboost_baseline.md`）。
 
-**Test：XGBoost vs MLP vs Deployable-GW（公平）+ Original-GW（参照）**（Probe 行来自 `results/stage2_probe_table_{dataset}.csv`）：
+**Test：XGBoost vs MLP vs Deployable-GW（公平）+ Original-GW（参照）**（Probe 行来自 `../results/stage2_probe_table_{dataset}.csv`）：
 
 
 | 数据集      | XGB F1 | MLP F1 | Deployable-GW F1 | XGB 步数 | MLP 步数 | Original-GW F1（参照） |
-| -------- | ------ | ------ | ---------------- | ------ | ------ | --------------------- |
-| hotpotqa | 0.5180 | 0.5256 | 0.3698           | 2.835  | 2.892  | 0.6089                |
-| musique  | 0.1618 | 0.1785 | 0.0907           | 3.518  | 3.513  | 0.2235                |
-| 2wiki    | 0.3612 | 0.3580 | 0.2223           | 3.226  | 3.109  | 0.5121                |
+| -------- | ------ | ------ | ---------------- | ------ | ------ | ------------------ |
+| hotpotqa | 0.5180 | 0.5256 | 0.3698           | 2.835  | 2.892  | 0.6089             |
+| musique  | 0.1618 | 0.1785 | 0.0907           | 3.518  | 3.513  | 0.2235             |
+| 2wiki    | 0.3612 | 0.3580 | 0.2223           | 3.226  | 3.109  | 0.5121             |
 
 
 **按 dev（Phase C 选完阈值后）锁定的最优超参与阈值**：
@@ -493,7 +506,7 @@ score = F1 - lambda_cost * normalized_cost
 
 ### 全量验收记录（2026-04-06）
 
-**对照说明**：下列 **默认** 行为 `python -m stage2.run_stage2 --datasets hotpotqa,musique,2wiki`（无 `--artifact-suffix`），与三组消融均在 **同一代码快照** 下完成（18 维浅层含 D4×3、`ProbeMLP_v2`、Phase A 超参 + Phase C 阈值）。D3 三组使用 `--artifact-suffix`，产出 `results/stage2_probe_table_{dataset}_{suffix}.csv` 与 `results/stage2_report_{suffix}.md`。
+**对照说明**：下列 **默认** 行为 `python -m stage2.run_stage2 --datasets hotpotqa,musique,2wiki`（无 `--artifact-suffix`），与三组消融均在 **同一代码快照** 下完成（18 维浅层含 D4×3、`ProbeMLP_v2`、Phase A 超参 + Phase C 阈值）。D3 三组使用 `--artifact-suffix`，产出 `../results/stage2_probe_table_{dataset}_{suffix}.csv` 与 `stage2_report_{suffix}.md`（位于 `docs/`）。
 
 **命令**：
 
@@ -501,7 +514,7 @@ score = F1 - lambda_cost * normalized_cost
 - 实验 2：`python -m stage2.run_stage2 --datasets hotpotqa,musique,2wiki --focal-gamma 1.0 --artifact-suffix d3_exp2_focal1`
 - 实验 3：`python -m stage2.run_stage2 --datasets hotpotqa,musique,2wiki --focal-gamma 2.0 --label-smoothing 0 --artifact-suffix d3_exp3_focal2_nols`
 
-**Test：Probe F1 / 步数（各配置取对应 CSV 的 Probe 行；公平对照 Deployable-GW：hotpotqa/musique/2wiki 的 F1 分别为 **0.3698 / 0.0907 / 0.2223**，步数约 **1.01–1.05**；Original-GW 仍为上界参照）**：
+**Test：Probe F1 / 步数（各配置取对应 CSV 的 Probe 行；公平对照 Deployable-GW：hotpotqa/musique/2wiki 的 F1 分别为 0.3698 / 0.0907 / 0.2223，步数约 1.01–1.05；Original-GW 仍为上界参照）**：
 
 
 | 配置                 | hotpotqa Probe F1 | hotpotqa 步数 | musique Probe F1 | musique 步数 | 2wiki Probe F1 | 2wiki 步数 |
@@ -518,7 +531,7 @@ score = F1 - lambda_cost * normalized_cost
 - **温和 Focal（γ=1）在 musique / 2wiki 上为四配置中最优或并列最优**；hotpotqa 与默认/实验 3 同量级。
 - **去掉 smoothing（γ=2, ε=0）**：hotpotqa 与默认几乎相同（+0.0005 F1），musique 低于默认与实验 2，说明 **smoothing 与强 focal 的组合并非唯一有害项**，单独关 smoothing 不能稳定救 musique。
 
-**小结**：在当前 18 维特征与 Phase C 阈值流程下，**无单一损失配置在三数据集上同时严格优于默认**；**γ=1 + ε=0.05** 在 musique、2wiki 上略好，可作为可选默认或论文消融主行。完整逐数据集表见 `results/stage2_report_d3_exp1_bce.md` 等。
+**小结**：在当前 18 维特征与 Phase C 阈值流程下，**无单一损失配置在三数据集上同时严格优于默认**；**γ=1 + ε=0.05** 在 musique、2wiki 上略好，可作为可选默认或论文消融主行。完整逐数据集表见 `stage2_report_d3_exp1_bce.md` 等。
 
 #### D4：补充答案质量代理特征（核心突破点）✅ 代码已落地 + 全量重训已完成（最低成本三项）
 
@@ -546,7 +559,16 @@ score = F1 - lambda_cost * normalized_cost
 
 未实现项（仍依赖 Stage1/额外推理）：`answer_logprob`、`self_eval_score`。
 
-**全量重训与验收**：已于 **2026-04-06** 完成——与上节 **Phase D3「全量验收记录」** 中默认及三组消融在 **同一 18 维（含 D4×3）代码快照**下执行（见 D3 开头「对照说明」）。当前默认 `results/stage2_probe_table_{dataset}.csv` 中 Probe 行与 D3 表内「默认」行均对应该次重训。复现命令：`python -m stage2.run_stage2 --datasets hotpotqa,musique,2wiki`。
+**推荐推进顺序（与 D1 重刷结论一致）**：
+
+1. **P0（已完成）**：重跑 `run_feature_diagnostic`，确认 D4×3 单变量信号（见上节 D1 表）。
+2. **P1（主攻）**：Stage1 记录 `**answer_logprob`**，建议一次性落盘 **mean / min / `delta_answer_logprob`**，再接入 Stage2 浅层维度并重训。
+3. **P2**：若仍不足，再考虑 `**self_eval_score`**（成本高，与 `self_consistency` 可能重叠）。
+4. **P3**：新特征接入后全量 `run_stage2`，并与 Deployable-GW 对比。
+
+详细 rationale 见 `stage2_next_steps_analysis.md`。
+
+**全量重训与验收**：已于 **2026-04-06** 完成——与上节 **Phase D3「全量验收记录」** 中默认及三组消融在 **同一 18 维（含 D4×3）代码快照**下执行（见 D3 开头「对照说明」）。当前默认 `../results/stage2_probe_table_{dataset}.csv` 中 Probe 行与 D3 表内「默认」行均对应该次重训。复现命令：`python -m stage2.run_stage2 --datasets hotpotqa,musique,2wiki`。
 
 #### D5：重新定义公平对比基线 📐
 
@@ -565,12 +587,12 @@ score = F1 - lambda_cost * normalized_cost
 - 保留值 r_k* 在 train 上用 self_consistency 的步间增益估计（与 F1 版 Weitzman 同一套 `compute_reservation_value` 方程）
 - 此 Deployable-GW 不需要 ground truth，是 Probe 的公平竞争对手；**test 上汇报的 F1/EM 仍为停步处的真实指标**（停止规则不读 GT F1）
 - **代码**：`pretest/utils/weitzman.py` 中 `compute_all_reservation_values_from_proxy`、`deployable_weitzman_stopping_simulation`；`stage2/run_stage2.py` 在默认 test 汇总表中追加 **Deployable-GW** 行（Pareto 图对该策略使用紫色三角向下标记）
-- **快速评估（不重训 Probe）**：`python -m stage2.run_deployable_gw_eval --datasets hotpotqa,musique,2wiki` → `results/stage2_deployable_gw.json`
+- **快速评估（不重训 Probe）**：`python -m stage2.run_deployable_gw_eval --datasets hotpotqa,musique,2wiki` → `../results/stage2_deployable_gw.json`
 - **预期**：Deployable-GW 会比 Original-GW 差很多（因为 self_consistency ≠ F1），Probe 可能反超 — **实测见下表**
 
 ### Deployable-GW 全量验收记录（2026-04-07）
 
-**命令**：`python -m stage2.run_deployable_gw_eval --datasets hotpotqa,musique,2wiki`（`cost_per_step=0.05`，`max_k=5`，代理键 `self_consistency`）。**Probe / Original-GW** 数字来自同目录下既有 `results/stage2_probe_table_{dataset}.csv`（与当前默认 Stage2 表一致）。
+**命令**：`python -m stage2.run_deployable_gw_eval --datasets hotpotqa,musique,2wiki`（`cost_per_step=0.05`，`max_k=5`，代理键 `self_consistency`）。**Probe / Original-GW** 数字来自 `../results/stage2_probe_table_{dataset}.csv`（与当前默认 Stage2 表一致）。
 
 
 | 数据集      | Deployable-GW F1 | Deployable-GW 步数 | Deployable-GW 成本 | Probe F1   | Probe 步数 | Original-GW F1 | Original-GW 步数 |
@@ -601,7 +623,7 @@ score = F1 - lambda_cost * normalized_cost
 
 **核心指标（Phase D 后必须达到）**：
 
-- D1 完成：产出特征诊断报告，明确特征瓶颈所在
+- D1 完成：产出特征诊断报告（**18 维与代码一致**，2026-04-07 已重刷），明确特征瓶颈与 D4×3 单变量表现
 - D2 完成：GBDT 基线确认瓶颈归因 ✅（2026-04-06：XGB ≈ MLP，倾向特征瓶颈 → D4）
 - Probe 在 Pareto 图上 **不被 Deployable-GW 支配**（至少 2/3 数据集；用方案 B 的公平基线）
 - 若补特征后 Probe 仍不如 Deployable-GW，则混合策略（方案 C）在 2/3 数据集上超越 Deployable-GW
@@ -629,19 +651,19 @@ score = F1 - lambda_cost * normalized_cost
 ## 执行节奏
 
 
-| 日程     | 任务                                               | 产出                                                                                  | 状态        |
-| ------ | ------------------------------------------------ | ----------------------------------------------------------------------------------- | --------- |
-| Day 1  | 实现 `ProbeMLP_v2` + 双分支训练管线                       | 代码已合入；全量三数据集已跑                                                                      | ✅         |
-| Day 2  | 加入 Delta Features（优先级 4）                         | 15 维浅层已合入；全量三数据集已跑                                                                  | ✅         |
-| Day 3  | **Phase A：训练稳定化** — LR 调度 / warmup / 梯度裁剪 / 超参调整 | 重训三数据集，检查过拟合 gap 和 dev acc                                                          | ✅         |
-| Day 3+ | **Phase B：Focal Loss + Label Smoothing + 类别平衡**  | 重训，对比 Phase A 结果                                                                    | ✅         |
-| Day 4  | **Phase C：阈值选择改进** + 消融实验                        | Pareto-aware 阈值 + Original-GW(dev) 步数约束；全量三数据集已跑                                     | ✅         |
-| Day 5  | **Phase D1：特征-标签诊断**                             | `results/stage2_feature_diagnostic.md` + PCA 图                                      | ✅         |
-| Day 5  | **Phase D2：GBDT 基线**                             | `results/stage2_xgboost_baseline.md` + `.json`                                      | ✅         |
-| Day 5  | **Phase D3：回退损失函数消融**                            | 对比表已写入本节 D3「全量验收记录」+ `results/stage2_report_d3_*.md`                                | ✅         |
-| Day 6  | **Phase D4：补充答案质量代理特征**                          | 18 维浅层（+D4×3）已合入；**全量三数据集已重训**（与 D3 默认/消融同快照，见 D3「对照说明」）                    | ✅         |
-| Day 6  | **Phase D5：Deployable-GW + 论文叙事重构**              | Deployable-GW 代码 + `results/stage2_deployable_gw.json`；全量 `run_stage2` 可带新表行/Pareto | ✅ 代码与基线评估 |
-| Day 7  | **Phase D6：简化模型基线 + 最终消融**                       | 逻辑回归 / 线性 Probe；论文消融表                                                               | 待 D5      |
+| 日程     | 任务                                               | 产出                                                                                     | 状态        |
+| ------ | ------------------------------------------------ | -------------------------------------------------------------------------------------- | --------- |
+| Day 1  | 实现 `ProbeMLP_v2` + 双分支训练管线                       | 代码已合入；全量三数据集已跑                                                                         | ✅         |
+| Day 2  | 加入 Delta Features（优先级 4）                         | 15 维浅层已合入；全量三数据集已跑                                                                     | ✅         |
+| Day 3  | **Phase A：训练稳定化** — LR 调度 / warmup / 梯度裁剪 / 超参调整 | 重训三数据集，检查过拟合 gap 和 dev acc                                                             | ✅         |
+| Day 3+ | **Phase B：Focal Loss + Label Smoothing + 类别平衡**  | 重训，对比 Phase A 结果                                                                       | ✅         |
+| Day 4  | **Phase C：阈值选择改进** + 消融实验                        | Pareto-aware 阈值 + Original-GW(dev) 步数约束；全量三数据集已跑                                       | ✅         |
+| Day 5  | **Phase D1：特征-标签诊断**                             | `stage2_feature_diagnostic.md` + PCA 图（**2026-04-07 已按 18 维重刷**）                       | ✅         |
+| Day 5  | **Phase D2：GBDT 基线**                             | `stage2_xgboost_baseline.md` + `.json`                                                 | ✅         |
+| Day 5  | **Phase D3：回退损失函数消融**                            | 对比表已写入本节 D3「全量验收记录」+ `stage2_report_d3_*.md`（`docs/`）                                  | ✅         |
+| Day 6  | **Phase D4：补充答案质量代理特征**                          | 18 维浅层（+D4×3）已合入；**全量三数据集已重训**（与 D3 默认/消融同快照，见 D3「对照说明」）                               | ✅         |
+| Day 6  | **Phase D5：Deployable-GW + 论文叙事重构**              | Deployable-GW 代码 + `../results/stage2_deployable_gw.json`；全量 `run_stage2` 可带新表行/Pareto | ✅ 代码与基线评估 |
+| Day 7  | **Phase D6：简化模型基线 + 最终消融**                       | 逻辑回归 / 线性 Probe；论文消融表                                                                  | 待 D5      |
 
 
-**里程碑判定**：Day 5 结束时，D1+D2 的结论决定后续路线。D1+D2 均已对齐：**浅层 AUROC 偏弱 + XGB 未显著优于 MLP** → **D4 补特征为最高优先级**（**D4 三特征已合入且全量重训已完成**，与 D3 同快照）；**D3** 损失消融已补齐（见上）。若未来出现 **GBDT >> MLP**，再优先改 MLP 训练/容量（D5 模型侧）。
+**里程碑判定**：Day 5 结束时，D1+D2 的结论决定后续路线。D1+D2 均已对齐：**浅层 AUROC 偏弱 + XGB 未显著优于 MLP** → **D4 低成本三项已合入且全量重训已完成**（与 D3 同快照）；**D1 已按 18 维重刷**，D4×3 中单变量最强为 `retrieval_marginal_novelty`，整体仍未接近「强答案质量代理」，**下一优先为 Stage1 侧 `answer_logprob` 系列**（见 D4「推荐推进顺序」与 `stage2_next_steps_analysis.md`）。**D3** 损失消融已补齐（见上）。若未来出现 **GBDT >> MLP**，再优先改 MLP 训练/容量（D5 模型侧）。

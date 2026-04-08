@@ -1,7 +1,7 @@
 """
 Phase D1：训练集特征 vs action_label 诊断（point-biserial、AUROC、hidden PCA、Oracle margin 分布）。
 
-产出：results/stage2_feature_diagnostic.md 与 results/stage2_feature_diagnostic_pca_<dataset>.png
+产出：docs/stage2_feature_diagnostic.md 与 results/stage2_feature_diagnostic_pca_<dataset>.png
 
 用法：
   python -m stage2.run_feature_diagnostic --datasets hotpotqa,musique,2wiki
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -177,13 +178,19 @@ def run_diagnostic(cfg: Stage2Config, dataset: str) -> Dict[str, Any]:
 
     pca_path = cfg.results_dir / f"stage2_feature_diagnostic_pca_{dataset}.png"
     pca_meta = _plot_hidden_pca(x_h, y, pca_path, dataset, hidden_dim)
+    out_md = cfg.docs_dir / "stage2_feature_diagnostic.md"
+    cfg.docs_dir.mkdir(parents=True, exist_ok=True)
+    pca_href = os.path.relpath(
+        str(pca_path.resolve()),
+        start=str(out_md.parent.resolve()),
+    )
 
     return {
         "dataset": dataset,
         "train_stats": {k: v for k, v in st.items() if k != "oracle_margins"},
         "shallow_feature_diag": shallow_rows,
         "margin_stats": margin_stats,
-        "pca": {"path": str(pca_path.relative_to(cfg.root_dir)), **pca_meta},
+        "pca": {"path": pca_href, **pca_meta},
     }
 
 
@@ -255,7 +262,7 @@ def _write_report(cfg: Stage2Config, sections: List[Dict[str, Any]]) -> Path:
     lines.append("- **模糊样本占比高** 时，硬标签噪声大，会拖累 Probe 与 Focal 等损失；可与 D3 回退损失联动。")
     lines.append("- PCA 平面上两类 **严重重叠** 时，仅靠线性可分 hidden 信息不足，与 ProbeMLP_v2 难提取信号一致。\n")
 
-    out = cfg.results_dir / "stage2_feature_diagnostic.md"
+    out = cfg.docs_dir / "stage2_feature_diagnostic.md"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return out

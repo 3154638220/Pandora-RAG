@@ -28,7 +28,7 @@ from pathlib import Path
 # 与 stage1.run_stage1 保持一致
 # Hotpot distractor 与 MuSiQue 在 Hub 上仅提供 train/validation；test 由 prepare_data 从 validation 尾部切分；
 # Calib+Dev 从剩余 validation 池中 seed 打乱后各取配额，与 Test 的 id 正交。
-# 若 validation 偏小（如 MuSiQue），prepare_data 会收窄 test，优先保证 Calib+Dev 满额（见 experiments.md A2）。
+# 若 validation 偏小（如 MuSiQue），prepare_data 会收窄 test，优先保证 Calib+Dev 满额（见 docs/experiments.md A2）。
 HF_SPECS = {
     "hotpotqa": ("hotpot_qa", "distractor", ("train", "validation")),
     "musique": ("dgslibisey/MuSiQue", None, ("train", "validation")),

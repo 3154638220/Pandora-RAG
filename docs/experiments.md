@@ -59,10 +59,10 @@
 
 - **C1. 计算真实保留值 $r_k^*$ 与实例 Oracle**
   - **Global-Weitzman (静态基线)**：在 Train 集上统计每步经验增益分布，求解出一组全局静态保留值 $r_k^*$。
-  - **实例 Oracle (DP 上界)**：对每条轨迹在已知逐步 $Q_k$（如 F1 Score）下做后向归纳。写入 `artifacts/oracle/{dataset}/test_oracle_labels.jsonl`，关键标签包含 `action_label` (1=Continue, 0=Stop) 以及 `margin` (决策收益差距)；可含 `expected_continue_val` 等辅助字段便于调试。
+  - **实例 Oracle (DP 上界)**：对每条轨迹在已知逐步 $Q_k$（如 F1 Score）下做后向归纳。写入 `../artifacts/oracle/{dataset}/test_oracle_labels.jsonl`，关键标签包含 `action_label` (1=Continue, 0=Stop) 以及 `margin` (决策收益差距)；可含 `expected_continue_val` 等辅助字段便于调试。
   - 验收：可回放复现 Oracle 决策，决策路径无非法状态。
 - **C2. 绘制 Oracle Pareto Frontier**：绘制横轴(Cost) - 纵轴(F1) 的帕累托前沿包络图，验证 Oracle 和 Global-Weitzman 的性能差距（证明引入 Neural Probe 的理论价值）。
-  - 输出示例：`results/stage1_oracle_pareto_{dataset}.png`。
+  - 输出示例：`../results/stage1_oracle_pareto_{dataset}.png`。
   - 验收：Oracle 前沿包络须不低于 Global-Weitzman（在相同成本度量下）。
 
 **D. 质量门禁（Go/No-Go）**

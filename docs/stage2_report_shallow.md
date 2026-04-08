@@ -14,6 +14,6 @@
 
 ## Artifacts
 
-- `hotpotqa`: table=`results/stage2_probe_table_hotpotqa_shallow.csv`, pareto=`results/stage2_probe_pareto_hotpotqa_shallow.png`, model=`artifacts/probe/hotpotqa/probe_mlp_shallow.pt`
-- `musique`: table=`results/stage2_probe_table_musique_shallow.csv`, pareto=`results/stage2_probe_pareto_musique_shallow.png`, model=`artifacts/probe/musique/probe_mlp_shallow.pt`
-- `2wiki`: table=`results/stage2_probe_table_2wiki_shallow.csv`, pareto=`results/stage2_probe_pareto_2wiki_shallow.png`, model=`artifacts/probe/2wiki/probe_mlp_shallow.pt`
+- `hotpotqa`: table=`../results/stage2_probe_table_hotpotqa_shallow.csv`, pareto=`../results/stage2_probe_pareto_hotpotqa_shallow.png`, model=`../artifacts/probe/hotpotqa/probe_mlp_shallow.pt`
+- `musique`: table=`../results/stage2_probe_table_musique_shallow.csv`, pareto=`../results/stage2_probe_pareto_musique_shallow.png`, model=`../artifacts/probe/musique/probe_mlp_shallow.pt`
+- `2wiki`: table=`../results/stage2_probe_table_2wiki_shallow.csv`, pareto=`../results/stage2_probe_pareto_2wiki_shallow.png`, model=`../artifacts/probe/2wiki/probe_mlp_shallow.pt`

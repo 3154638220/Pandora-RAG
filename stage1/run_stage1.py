@@ -15,7 +15,7 @@ Usage:
 若某 split 的 trajectories.jsonl 条数少于 data/processed 下对应 jsonl，说明该 split 轨迹未跑满；可用 ``--skip-prepare --collect-splits train`` 只补跑指定 split 的检索+LLM+每步 hidden（其余 split 沿用已有缓存）。
 
 数据划分默认 Train=4000 / Calib=1000 / Dev=1000 / Test=1000；无独立 test split 时从 validation 划 test，
-若 validation 总条数不足 Calib+Dev+Test，则自动收窄 test（保证 Calib/Dev 满额），详见 experiments.md A2。
+若 validation 总条数不足 Calib+Dev+Test，则自动收窄 test（保证 Calib/Dev 满额），详见 docs/experiments.md A2。
 NLI 默认 CPU（NLI_DEVICE）。权重可放任意盘：设 NLI_MODEL_DIR 指向本地下载目录
 （如 models/cross-encoder-nli-deberta-v3-small）即离线加载。
 """
@@ -119,6 +119,10 @@ class Stage1Config:
     def results_dir(self) -> Path:
         return self.root_dir / "results"
 
+    @property
+    def docs_dir(self) -> Path:
+        return self.root_dir / "docs"
+
 
 def _ensure_dirs(cfg: Stage1Config) -> None:
     for p in [
@@ -128,6 +132,7 @@ def _ensure_dirs(cfg: Stage1Config) -> None:
         cfg.features_dir,
         cfg.oracle_dir,
         cfg.results_dir,
+        cfg.docs_dir,
     ]:
         p.mkdir(parents=True, exist_ok=True)
 
@@ -165,7 +170,7 @@ def _heuristic_nli(question: str, context: str) -> Tuple[float, float]:
 
 
 class NLICrossEncoderScorer:
-    """cross-encoder/nli-deberta-v3-small：文档 vs 问题+历史上下文（experiments.md B2）。"""
+    """cross-encoder/nli-deberta-v3-small：文档 vs 问题+历史上下文（docs/experiments.md B2）。"""
 
     DEFAULT_HUB_ID = "cross-encoder/nli-deberta-v3-small"
 
@@ -269,7 +274,7 @@ def _resolve_hidden_state_device(torch_module: Any) -> str:
 
 def _resolve_local_llama_weights_dir(cfg: Stage1Config) -> Optional[Path]:
     """
-    解析 Meta-Llama-3.1-8B-Instruct 本地权重目录（与 STORAGE_LAYOUT.md 一致：仓库内 models/ 常 symlink 到 haoge）。
+    解析 Meta-Llama-3.1-8B-Instruct 本地权重目录（与 docs/STORAGE_LAYOUT.md 一致：仓库内 models/ 常 symlink 到 haoge）。
     顺序：--root-dir 下 models/ → 本仓库根目录 models/ → 环境变量 PANDORA_MODELS_ROOT。
     """
     name = "Meta-Llama-3.1-8B-Instruct"
@@ -543,7 +548,7 @@ def _load_hf_split(dataset_name: str, split_name: str) -> Optional[Dataset]:
 
 def prepare_data(cfg: Stage1Config, dataset_name: str) -> Dict[str, int]:
     """
-    按 experiments.md：Train/Calib/Dev/Test 四切分，id 互不重叠；Calib+Dev 均从同一条 validation
+    按 docs/experiments.md：Train/Calib/Dev/Test 四切分，id 互不重叠；Calib+Dev 均从同一条 validation
     池中用 seed 打乱后顺序切出，专用于后续 E-value / CP 校准（严禁与 Test 重叠）。
     """
     rng = random.Random(cfg.seed)
@@ -794,6 +799,8 @@ def collect_trajectories(
 
                 tok = int(round(float(gen_meta.get("token_count", 0))))
                 lat_ms = float(gen_meta.get("latency_ms", 0.0))
+                answer_logprob = float(gen_meta.get("answer_logprob", 0.0) or 0.0)
+                self_eval_score = float(llm.self_evaluate_score(q, acc_context, current_answer))
 
                 steps.append(
                     {
@@ -810,6 +817,8 @@ def collect_trajectories(
                         },
                         "semantic_entropy": round(semantic_entropy, 6),
                         "self_consistency": round(self_consistency, 6),
+                        "answer_logprob": round(answer_logprob, 6),
+                        "self_eval_score": round(self_eval_score, 6),
                         "ctx_overlap": round(float(overlap), 6),
                         "nli_entail": round(float(nli_entail), 6),
                         "nli_contra": round(float(nli_contra), 6),
@@ -1110,9 +1119,21 @@ def build_stage1_report(cfg: Stage1Config, datasets: Sequence[str], metrics: Dic
     report_lines.append("")
     for ds in datasets:
         m = metrics[ds]
-        report_lines.append(
-            f"- `{ds}`: trajectory_cached={m['trajectory_cached']}, hidden_state_files={m['hidden_state_files']}, bad_feature_files={m['bad_feature_files']}"
-        )
+        hb = m.get("hidden_state_npz_by_split") or {}
+        if hb:
+            order = ("train", "calib", "dev", "test")
+            parts = ", ".join(f"{k}={hb.get(k, 0)}" for k in order)
+            htot = int(m.get("hidden_state_npz_total", sum(hb.values())))
+            btot = int(m.get("bad_feature_npz_total", m["bad_feature_files"]))
+            report_lines.append(
+                f"- `{ds}`: trajectory_cached={m['trajectory_cached']}, "
+                f"hidden_npz_total={htot} ({parts}), bad_npz_total={btot}"
+            )
+        else:
+            report_lines.append(
+                f"- `{ds}`: trajectory_cached={m['trajectory_cached']}, "
+                f"hidden_state_files={m['hidden_state_files']}, bad_feature_files={m['bad_feature_files']}"
+            )
     report_lines.append("")
     report_lines.append("## Feature Distribution")
     report_lines.append("")
@@ -1124,8 +1145,13 @@ def build_stage1_report(cfg: Stage1Config, datasets: Sequence[str], metrics: Dic
     report_lines.append("")
     report_lines.append("## Oracle Frontier")
     report_lines.append("")
+    report_out = cfg.docs_dir / "stage1_report.md"
+    root = cfg.root_dir.resolve()
     for ds in datasets:
-        report_lines.append(f"- `{ds}` pareto: `{metrics[ds]['pareto_path']}`")
+        pp = Path(str(metrics[ds]["pareto_path"]))
+        full = pp.resolve() if pp.is_absolute() else (root / pp).resolve()
+        rel = os.path.relpath(str(full), start=str(report_out.parent.resolve()))
+        report_lines.append(f"- `{ds}` pareto: `{rel}`")
     report_lines.append("")
     report_lines.append("## Hop Alignment (Oracle Step vs GT Hop)")
     report_lines.append("")
@@ -1179,7 +1205,8 @@ def build_stage1_report(cfg: Stage1Config, datasets: Sequence[str], metrics: Dic
             f"- `{ds}`: cache_ok={g1}, feature_missing_rate={miss_rate:.4f}, oracle_gain={gain:.4f}, pass={g1 and g2 and g3}"
         )
 
-    report_path = cfg.results_dir / "stage1_report.md"
+    cfg.docs_dir.mkdir(parents=True, exist_ok=True)
+    report_path = report_out
     with report_path.open("w", encoding="utf-8") as f:
         f.write("\n".join(report_lines) + "\n")
     return report_path
@@ -1281,14 +1308,33 @@ def run_dataset_stage1(
     for row in _read_jsonl(test_traj_path):
         all_steps.extend(row.get("steps", []))
     key_missing_rate = _count_missing_key(
-        all_steps, ["semantic_entropy", "self_consistency", "ctx_overlap", "nli_entail", "nli_contra"]
+        all_steps,
+        [
+            "semantic_entropy",
+            "self_consistency",
+            "answer_logprob",
+            "self_eval_score",
+            "ctx_overlap",
+            "nli_entail",
+            "nli_contra",
+        ],
     )
     entropy_vals = [float(s.get("semantic_entropy", 0.0)) for s in all_steps]
     consistency_vals = [float(s.get("self_consistency", 0.0)) for s in all_steps]
     overlap_vals = [float(s.get("ctx_overlap", 0.0)) for s in all_steps]
 
-    feature_dir = cfg.features_dir / dataset_name / "test" / "hidden_states"
-    total_feats, bad_feats = _scan_feature_files(feature_dir)
+    hidden_npz_by_split: Dict[str, int] = {}
+    bad_npz_by_split: Dict[str, int] = {}
+    for split in all_splits:
+        fd = cfg.features_dir / dataset_name / split / "hidden_states"
+        n, b = _scan_feature_files(fd)
+        hidden_npz_by_split[split] = n
+        bad_npz_by_split[split] = b
+    # 历史字段名保留：仅 test split 的 .npz 数量（MuSiQue test 仅 417 条 → 2085 个文件，易与「全量轨迹」混淆）
+    total_feats = int(hidden_npz_by_split.get("test", 0))
+    bad_feats = int(bad_npz_by_split.get("test", 0))
+    hidden_npz_total = int(sum(hidden_npz_by_split.values()))
+    bad_npz_total = int(sum(bad_npz_by_split.values()))
 
     fixed_rows = [r for r in oracle_info["table"] if r["strategy"].startswith("Fixed-K=")]
     best_fixed_f1 = max((r["avg_f1"] for r in fixed_rows), default=0.0)
@@ -1300,6 +1346,10 @@ def run_dataset_stage1(
         "trajectory_cached": sum(cached_counts.values()),
         "hidden_state_files": total_feats,
         "bad_feature_files": bad_feats,
+        "hidden_state_npz_by_split": hidden_npz_by_split,
+        "hidden_state_npz_total": hidden_npz_total,
+        "bad_feature_npz_by_split": bad_npz_by_split,
+        "bad_feature_npz_total": bad_npz_total,
         "entropy_mean": float(np.mean(entropy_vals) if entropy_vals else 0.0),
         "self_consistency_mean": float(np.mean(consistency_vals) if consistency_vals else 0.0),
         "overlap_mean": float(np.mean(overlap_vals) if overlap_vals else 0.0),

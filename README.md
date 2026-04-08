@@ -2,6 +2,8 @@
 （潘多拉 RAG：基于任意时刻有效风险控制的多跳检索最优停止）
 **目标会议：** emnlp 2026
 
+**说明文档**（除本 README 外，仓库内 Markdown 均集中在 [`docs/`](docs/)：`plan.md`、`experiments.md`、Stage 报告与特征诊断等。）
+
 ---
 
 ## 一、 项目背景与核心动机

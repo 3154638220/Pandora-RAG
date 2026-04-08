@@ -1,0 +1,258 @@
+from __future__ import annotations
+
+"""
+停止策略仿真：输入为逐步「继续概率」、浅层特征与质量模型输出，与 Stage2 探针结构解耦。
+
+依赖 ``pretest.utils.weitzman.trajectory_cumulative_cost`` 仅用于汇总成本（与 Stage2 评估一致）。
+"""
+
+import math
+from typing import Any, Dict, List, Sequence, Tuple
+
+import numpy as np
+from sklearn.pipeline import Pipeline
+
+from pretest.utils.weitzman import trajectory_cumulative_cost
+
+from stage3.evalue import EWealthTracker, betting_multiplier_indicator
+from stage3.quality_model import predict_success_prob
+
+
+def _sorted_steps(traj: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return sorted(traj.get("steps") or [], key=lambda s: int(s.get("step", 0)))
+
+
+def _empty_outcome(cfg: Any, gamma: float) -> Dict[str, Any]:
+    return {
+        "f1": 0.0,
+        "em": 0,
+        "steps_used": 0,
+        "avg_cost": 0.0,
+        "error": int(0.0 < float(gamma)),
+    }
+
+
+def _finalize_row(
+    traj: Dict[str, Any],
+    chosen: Dict[str, Any],
+    cfg: Any,
+    gamma: float,
+) -> Dict[str, Any]:
+    used = int(chosen.get("step", 0))
+    cum_cost = trajectory_cumulative_cost(
+        traj,
+        used,
+        cfg.cost_per_step,
+        cfg.max_k,
+        cfg.oracle_cost_metric,
+    )
+    f1 = float(chosen.get("f1", 0.0))
+    return {
+        "f1": f1,
+        "em": int(bool(chosen.get("em", False))),
+        "steps_used": used,
+        "avg_cost": float(cum_cost),
+        "error": int(f1 < float(gamma)),
+    }
+
+
+def simulate_evalue_gated_stops(
+    trajectories: Sequence[Dict[str, Any]],
+    continue_probs: Dict[Tuple[str, int], float],
+    shallow_by_step: Dict[Tuple[str, int], np.ndarray],
+    quality_model: Pipeline,
+    *,
+    cfg: Any,
+    probe_threshold: float,
+    gamma: float,
+    alpha: float,
+    quality_bar: float,
+) -> Tuple[List[Dict[str, Any]], List[float]]:
+    """
+    顺序处理 ``trajectories``：探针要求停止时，若更新 E-wealth 会突破 1/α 则强制继续，否则接受停止并更新 wealth。
+    在必须结束的最后一步（k==max_k）仍按同样规则更新 wealth（乘子可能被裁剪）。
+    """
+    tracker = EWealthTracker(alpha=float(alpha))
+    rows: List[Dict[str, Any]] = []
+    wealth_trace: List[float] = []
+
+    for traj in trajectories:
+        sample_id = str(traj.get("id", ""))
+        steps = _sorted_steps(traj)
+        if not steps:
+            rows.append(_empty_outcome(cfg, gamma))
+            wealth_trace.append(tracker.wealth)
+            continue
+
+        chosen = steps[-1]
+        stopped_early = False
+
+        for step in steps:
+            k = int(step.get("step", 0))
+            if k >= cfg.max_k:
+                chosen = step
+                break
+
+            p_cont = continue_probs.get((sample_id, k))
+            if p_cont is None:
+                continue
+
+            if float(p_cont) >= float(probe_threshold):
+                continue
+
+            z = shallow_by_step.get((sample_id, k))
+            if z is None:
+                continue
+            phat = float(predict_success_prob(quality_model, z.reshape(1, -1))[0])
+            mult_raw = betting_multiplier_indicator(
+                phat, alpha=float(alpha), quality_bar=float(quality_bar)
+            )
+            next_w = tracker.wealth * mult_raw
+            if next_w <= tracker.cap + 1e-12:
+                tracker.apply(mult_raw)
+                chosen = step
+                stopped_early = True
+                break
+
+        if not stopped_early:
+            z = shallow_by_step.get((sample_id, int(chosen.get("step", 0))))
+            if z is not None:
+                phat = float(predict_success_prob(quality_model, z.reshape(1, -1))[0])
+            else:
+                phat = 0.0
+            mult_raw = betting_multiplier_indicator(
+                phat, alpha=float(alpha), quality_bar=float(quality_bar)
+            )
+            m = tracker.try_apply_multiplier(mult_raw)
+            tracker.apply(m)
+
+        rows.append(_finalize_row(traj, chosen, cfg, gamma))
+        wealth_trace.append(tracker.wealth)
+
+    return rows, wealth_trace
+
+
+def simulate_conformal_phat_gate(
+    trajectories: Sequence[Dict[str, Any]],
+    continue_probs: Dict[Tuple[str, int], float],
+    shallow_by_step: Dict[Tuple[str, int], np.ndarray],
+    quality_model: Pipeline,
+    *,
+    cfg: Any,
+    probe_threshold: float,
+    gamma: float,
+    min_phat: float,
+) -> List[Dict[str, Any]]:
+    """
+    简单 split 型门控：探针想停时，额外要求 p_hat(F1≥γ) ≥ min_phat（min_phat 在 Calib 上按 (1-α) 分位校准）。
+    用于与 E-wealth 曲线对照，不涉及跨样本 wealth。
+    """
+    rows: List[Dict[str, Any]] = []
+    mp = float(min_phat)
+
+    for traj in trajectories:
+        sample_id = str(traj.get("id", ""))
+        steps = _sorted_steps(traj)
+        if not steps:
+            rows.append(_empty_outcome(cfg, gamma))
+            continue
+
+        chosen = steps[-1]
+        for step in steps:
+            k = int(step.get("step", 0))
+            if k >= cfg.max_k:
+                chosen = step
+                break
+            p_cont = continue_probs.get((sample_id, k))
+            if p_cont is None:
+                continue
+            if float(p_cont) >= float(probe_threshold):
+                continue
+            z = shallow_by_step.get((sample_id, k))
+            if z is None:
+                continue
+            phat = float(predict_success_prob(quality_model, z.reshape(1, -1))[0])
+            if phat >= mp - 1e-12:
+                chosen = step
+                break
+
+        rows.append(_finalize_row(traj, chosen, cfg, gamma))
+
+    return rows
+
+
+def probe_stop_shallow_and_phat(
+    traj: Dict[str, Any],
+    continue_probs: Dict[Tuple[str, int], float],
+    shallow_by_step: Dict[Tuple[str, int], np.ndarray],
+    quality_model: Pipeline,
+    *,
+    cfg: Any,
+    probe_threshold: float,
+) -> Tuple[np.ndarray, float, Dict[str, Any]]:
+    """探针在 dev/calib 上的「自然停止」步，用于阈值校准。"""
+    sample_id = str(traj.get("id", ""))
+    steps = _sorted_steps(traj)
+    if not steps:
+        z0 = np.zeros((1,), dtype=np.float32)
+        return z0, 0.0, {}
+
+    chosen = steps[-1]
+    for step in steps:
+        k = int(step.get("step", 0))
+        if k >= cfg.max_k:
+            chosen = step
+            break
+        p_cont = continue_probs.get((sample_id, k))
+        if p_cont is None:
+            continue
+        if float(p_cont) >= float(probe_threshold):
+            continue
+        chosen = step
+        break
+
+    kf = int(chosen.get("step", 0))
+    z = shallow_by_step.get((sample_id, kf))
+    if z is None:
+        return np.zeros((1,), dtype=np.float32), 0.0, chosen
+    phat = float(predict_success_prob(quality_model, np.asarray(z).reshape(1, -1))[0])
+    return np.asarray(z, dtype=np.float32), phat, chosen
+
+
+def conformal_min_phat_threshold(phat_stop: np.ndarray, alpha: float) -> float:
+    """Calib 上 probe 停止处的 p_hat 的保守下分位，用作 test 上允许停止的最小 p_hat。"""
+    p = np.sort(np.asarray(phat_stop, dtype=np.float64).reshape(-1))
+    n = int(p.size)
+    if n == 0:
+        return 0.5
+    idx = int(math.ceil((1.0 - float(alpha)) * (n + 1))) - 1
+    idx = min(max(idx, 0), n - 1)
+    return float(p[idx])
+
+
+def attach_error_labels(rows: Sequence[Dict[str, Any]], gamma: float) -> List[Dict[str, Any]]:
+    """为仅含 f1 的行补充 error = 1[f1 < γ]。"""
+    g = float(gamma)
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        d = dict(r)
+        d["error"] = int(float(d.get("f1", 0.0)) < g)
+        out.append(d)
+    return out
+
+
+def summarize(rows: Sequence[Dict[str, Any]], strategy: str) -> Dict[str, Any]:
+    f1s = [float(r.get("f1", 0.0)) for r in rows]
+    ems = [int(r.get("em", 0)) for r in rows]
+    steps = [int(r.get("steps_used", 0)) for r in rows]
+    costs = [float(r.get("avg_cost", 0.0)) for r in rows]
+    errs = [int(r.get("error", 0)) for r in rows]
+    return {
+        "strategy": strategy,
+        "avg_steps": float(np.mean(steps) if steps else 0.0),
+        "avg_cost": float(np.mean(costs) if costs else 0.0),
+        "avg_f1": float(np.mean(f1s) if f1s else 0.0),
+        "avg_em": float(np.mean(ems) if ems else 0.0),
+        "error_rate": float(np.mean(errs) if errs else 0.0),
+        "n": int(len(rows)),
+    }
