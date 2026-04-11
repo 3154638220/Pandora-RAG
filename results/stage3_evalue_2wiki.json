@@ -1,0 +1,108 @@
+{
+  "dataset": "2wiki",
+  "gammas": [
+    0.5
+  ],
+  "alphas": [
+    0.1,
+    0.2
+  ],
+  "probe_checkpoint": "artifacts/probe/2wiki/probe_mlp_pdopt_binary_hidden_residual.pt",
+  "betting_strategy": "predictive",
+  "outcome_aware": true,
+  "shift_type": "none",
+  "shift_fraction": 0.5,
+  "quality_use_probe_prob": true,
+  "shuffle_test_seed": 42,
+  "per_gamma": {
+    "0.5": {
+      "gamma": 0.5,
+      "quality_model_eval": {
+        "brier_score": 0.18015416362321085,
+        "ece": 0.11761574814898691,
+        "n_samples": 5000,
+        "positive_rate": 0.33219999074935913
+      },
+      "per_alpha": {
+        "0.1": {
+          "evalue_quality_bar": 0.0,
+          "conformal_min_phat": 0.8242921281931723,
+          "summaries": {
+            "probe": {
+              "strategy": "Probe",
+              "avg_steps": 3.371,
+              "avg_cost": 0.16855,
+              "avg_f1": 0.37381440000000005,
+              "avg_em": 0.314,
+              "error_rate": 0.611,
+              "n": 1000
+            },
+            "probe_evalue": {
+              "strategy": "Probe+E-value",
+              "avg_steps": 3.371,
+              "avg_cost": 0.16855,
+              "avg_f1": 0.37381440000000005,
+              "avg_em": 0.314,
+              "error_rate": 0.611,
+              "n": 1000
+            },
+            "probe_conformal_quantile": {
+              "strategy": "Probe+CP-quantile",
+              "avg_steps": 4.689,
+              "avg_cost": 0.23445,
+              "avg_f1": 0.3667838,
+              "avg_em": 0.307,
+              "error_rate": 0.62,
+              "n": 1000
+            }
+          },
+          "final_e_wealth": 9.99999999,
+          "wealth_cap": 10.0,
+          "plot_error_rate": "results/stage3_cum_error_2wiki_g0_5_a0_1.png",
+          "plot_wealth_trace": "results/stage3_wealth_2wiki_g0_5_a0_1.png"
+        },
+        "0.2": {
+          "evalue_quality_bar": 0.0,
+          "conformal_min_phat": 0.7616320368806706,
+          "summaries": {
+            "probe": {
+              "strategy": "Probe",
+              "avg_steps": 3.371,
+              "avg_cost": 0.16855,
+              "avg_f1": 0.37381440000000005,
+              "avg_em": 0.314,
+              "error_rate": 0.611,
+              "n": 1000
+            },
+            "probe_evalue": {
+              "strategy": "Probe+E-value",
+              "avg_steps": 3.371,
+              "avg_cost": 0.16855,
+              "avg_f1": 0.37381440000000005,
+              "avg_em": 0.314,
+              "error_rate": 0.611,
+              "n": 1000
+            },
+            "probe_conformal_quantile": {
+              "strategy": "Probe+CP-quantile",
+              "avg_steps": 4.449,
+              "avg_cost": 0.22244999999999998,
+              "avg_f1": 0.3715458,
+              "avg_em": 0.31,
+              "error_rate": 0.613,
+              "n": 1000
+            }
+          },
+          "final_e_wealth": 4.999999995,
+          "wealth_cap": 5.0,
+          "plot_error_rate": "results/stage3_cum_error_2wiki_g0_5_a0_2.png",
+          "plot_wealth_trace": "results/stage3_wealth_2wiki_g0_5_a0_2.png"
+        }
+      },
+      "plot_paths": {
+        "0.1": "results/stage3_cum_error_2wiki_g0_5_a0_1.png",
+        "0.2": "results/stage3_cum_error_2wiki_g0_5_a0_2.png"
+      }
+    }
+  }
+}

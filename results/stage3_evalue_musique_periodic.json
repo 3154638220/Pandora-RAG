@@ -1,0 +1,108 @@
+{
+  "dataset": "musique",
+  "gammas": [
+    0.5
+  ],
+  "alphas": [
+    0.1,
+    0.2
+  ],
+  "probe_checkpoint": "artifacts/probe/musique/probe_mlp_pdopt_binary_last_token.pt",
+  "betting_strategy": "predictive",
+  "outcome_aware": true,
+  "shift_type": "periodic",
+  "shift_fraction": 0.5,
+  "quality_use_probe_prob": true,
+  "shuffle_test_seed": 42,
+  "per_gamma": {
+    "0.5": {
+      "gamma": 0.5,
+      "quality_model_eval": {
+        "brier_score": 0.1898944975906787,
+        "ece": 0.23921059424112112,
+        "n_samples": 5000,
+        "positive_rate": 0.17000000178813934
+      },
+      "per_alpha": {
+        "0.1": {
+          "evalue_quality_bar": 0.87,
+          "conformal_min_phat": 0.7860325691186568,
+          "summaries": {
+            "probe": {
+              "strategy": "Probe",
+              "avg_steps": 3.2517985611510793,
+              "avg_cost": 0.16258992805755398,
+              "avg_f1": 0.1825510791366906,
+              "avg_em": 0.11750599520383694,
+              "error_rate": 0.7913669064748201,
+              "n": 417
+            },
+            "probe_evalue": {
+              "strategy": "Probe+E-value",
+              "avg_steps": 5.0,
+              "avg_cost": 0.25,
+              "avg_f1": 0.13277434052757794,
+              "avg_em": 0.07194244604316546,
+              "error_rate": 0.8489208633093526,
+              "n": 417
+            },
+            "probe_conformal_quantile": {
+              "strategy": "Probe+CP-quantile",
+              "avg_steps": 4.911270983213429,
+              "avg_cost": 0.24556354916067147,
+              "avg_f1": 0.1401400479616307,
+              "avg_em": 0.0815347721822542,
+              "error_rate": 0.841726618705036,
+              "n": 417
+            }
+          },
+          "final_e_wealth": 9.99999999,
+          "wealth_cap": 10.0,
+          "plot_error_rate": "results/stage3_cum_error_musique_g0_5_a0_1_periodic.png",
+          "plot_wealth_trace": "results/stage3_wealth_musique_g0_5_a0_1_periodic.png"
+        },
+        "0.2": {
+          "evalue_quality_bar": 0.87,
+          "conformal_min_phat": 0.727918060973967,
+          "summaries": {
+            "probe": {
+              "strategy": "Probe",
+              "avg_steps": 3.2517985611510793,
+              "avg_cost": 0.16258992805755398,
+              "avg_f1": 0.1825510791366906,
+              "avg_em": 0.11750599520383694,
+              "error_rate": 0.7913669064748201,
+              "n": 417
+            },
+            "probe_evalue": {
+              "strategy": "Probe+E-value",
+              "avg_steps": 5.0,
+              "avg_cost": 0.25,
+              "avg_f1": 0.13277434052757794,
+              "avg_em": 0.07194244604316546,
+              "error_rate": 0.8489208633093526,
+              "n": 417
+            },
+            "probe_conformal_quantile": {
+              "strategy": "Probe+CP-quantile",
+              "avg_steps": 4.764988009592326,
+              "avg_cost": 0.2382494004796163,
+              "avg_f1": 0.1493326139088729,
+              "avg_em": 0.09112709832134293,
+              "error_rate": 0.8345323741007195,
+              "n": 417
+            }
+          },
+          "final_e_wealth": 4.999999995,
+          "wealth_cap": 5.0,
+          "plot_error_rate": "results/stage3_cum_error_musique_g0_5_a0_2_periodic.png",
+          "plot_wealth_trace": "results/stage3_wealth_musique_g0_5_a0_2_periodic.png"
+        }
+      },
+      "plot_paths": {
+        "0.1": "results/stage3_cum_error_musique_g0_5_a0_1_periodic.png",
+        "0.2": "results/stage3_cum_error_musique_g0_5_a0_2_periodic.png"
+      }
+    }
+  }
+}

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -19,12 +19,16 @@ from sklearn.preprocessing import StandardScaler
 from stage2.run_stage2 import (
     ProbeMLP,
     ProbeMLP_v2,
+    ProbeSequenceGRU,
     Stage2Config,
+    _build_autoreg_step_feature_map,
     _build_step_feature_map,
     _infer_hidden_dim,
     _load_hidden_map,
     _load_trajectories,
-    _precompute_probe_probs,
+    _precompute_probe_probs_autoreg_mlp,
+    _precompute_probe_probs_from_map,
+    _precompute_probe_probs_gru,
     _simulate_probe_policy_from_probs,
     _stage2_artifact_tag,
 )
@@ -39,11 +43,49 @@ class Stage2ProbeBundle:
     dual_input: bool
     shallow_only: bool
     hidden_state_key: str
+    seq_history_features: bool = False
+    sequence_gru: bool = False
 
 
 def default_probe_checkpoint_path(cfg: Stage2Config, dataset: str) -> Path:
     tag = _stage2_artifact_tag(cfg)
     return cfg.artifacts_probe_dir / dataset / f"probe_mlp{tag}.pt"
+
+
+PER_DATASET_BEST_SUFFIX: Dict[str, str] = {
+    "hotpotqa": "pdopt_binary_last_token",
+    "musique": "pdopt_binary_last_token",
+    "2wiki": "pdopt_binary_hidden_residual",
+}
+
+
+def find_best_probe_checkpoint(
+    artifacts_dir: Path,
+    dataset: str,
+    preferred_suffix: str = "pdopt_best",
+) -> Optional[Path]:
+    """
+    在 artifacts/probe/{dataset}/ 下自动搜索最优 checkpoint。
+    优先级：preferred_suffix → per-dataset 最优 → pdopt_best → 默认无后缀。
+    """
+    base = artifacts_dir / dataset
+    if not base.is_dir():
+        return None
+
+    ds_best = PER_DATASET_BEST_SUFFIX.get(dataset.lower(), "pdopt_binary_last_token")
+    candidates = [
+        f"probe_mlp_{preferred_suffix}.pt",
+        f"probe_mlp_{ds_best}.pt",
+        "probe_mlp_pdopt_best.pt",
+        "probe_mlp_pdopt_binary_last_token.pt",
+        "probe_mlp.pt",
+    ]
+    for name in candidates:
+        p = base / name
+        if p.exists():
+            return p
+    pts = sorted(base.glob("probe_mlp*.pt"), key=lambda x: x.stat().st_mtime, reverse=True)
+    return pts[0] if pts else None
 
 
 def load_stage2_probe_bundle(checkpoint: Path, device: torch.device) -> Stage2ProbeBundle:
@@ -55,6 +97,8 @@ def load_stage2_probe_bundle(checkpoint: Path, device: torch.device) -> Stage2Pr
     sdim = int(ckpt["shallow_feature_dim"])
     dropout = float(ckpt["dropout"])
     arch = str(ckpt.get("probe_arch", "mlp_v2"))
+    seq_hist = bool(ckpt.get("seq_history_features", False))
+    seq_gru = bool(ckpt.get("sequence_gru", False))
 
     if shallow_only:
         model = ProbeMLP(sdim, int(ckpt["mlp_hidden_dim"]), dropout).to(device)
@@ -65,9 +109,22 @@ def load_stage2_probe_bundle(checkpoint: Path, device: torch.device) -> Stage2Pr
             int(ckpt["compress_dim"]),
             int(ckpt["fuse_dim"]),
             dropout,
+            hidden_branch_residual=bool(ckpt.get("hidden_branch_residual", False)),
+        ).to(device)
+    elif arch == "mlp_v2_gru":
+        model = ProbeSequenceGRU(
+            int(ckpt["stage1_hidden_dim"]),
+            sdim,
+            int(ckpt["compress_dim"]),
+            int(ckpt["fuse_dim"]),
+            int(ckpt.get("gru_hidden_dim") or 128),
+            dropout,
+            hidden_branch_residual=bool(ckpt.get("hidden_branch_residual", False)),
         ).to(device)
     else:
-        raise ValueError(f"不支持的 Stage2 checkpoint probe_arch={arch!r}（仅支持 mlp / mlp_v2）。")
+        raise ValueError(
+            f"不支持的 Stage2 checkpoint probe_arch={arch!r}（支持 mlp / mlp_v2 / mlp_v2_gru）。"
+        )
 
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
@@ -79,7 +136,7 @@ def load_stage2_probe_bundle(checkpoint: Path, device: torch.device) -> Stage2Pr
     scaler.n_features_in_ = int(scaler.mean_.shape[0])
     scaler.n_samples_seen_ = 1
 
-    dual = isinstance(model, ProbeMLP_v2)
+    dual = isinstance(model, (ProbeMLP_v2, ProbeSequenceGRU))
     return Stage2ProbeBundle(
         model=model,
         scaler=scaler,
@@ -88,6 +145,8 @@ def load_stage2_probe_bundle(checkpoint: Path, device: torch.device) -> Stage2Pr
         dual_input=dual,
         shallow_only=shallow_only,
         hidden_state_key=str(ckpt.get("hidden_state_key", "last_token")),
+        seq_history_features=seq_hist,
+        sequence_gru=seq_gru,
     )
 
 
@@ -96,7 +155,7 @@ def load_trajectories_and_step_features(
     dataset: str,
     split: str,
     bundle: Stage2ProbeBundle,
-) -> Tuple[List[Dict[str, Any]], Dict[Tuple[str, int], np.ndarray]]:
+) -> Tuple[List[Dict[str, Any]], Dict[Tuple[str, int], np.ndarray], Dict[Tuple[str, int], np.ndarray], int]:
     trajs = _load_trajectories(cfg, dataset, split)
     if bundle.shallow_only:
         hd = 0
@@ -104,16 +163,40 @@ def load_trajectories_and_step_features(
     else:
         hd = _infer_hidden_dim(cfg, dataset, split, bundle.hidden_state_key)
         hmap = _load_hidden_map(cfg, dataset, split, hd, bundle.hidden_state_key)
-    feat_map = _build_step_feature_map(trajs, hmap, hd, cfg)
-    return trajs, feat_map
+    if bundle.seq_history_features and not bundle.shallow_only:
+        feat_map = _build_autoreg_step_feature_map(trajs, hmap, hd, cfg, bundle.model, bundle.scaler)
+    else:
+        feat_map = _build_step_feature_map(trajs, hmap, hd, cfg)
+    return trajs, feat_map, hmap, hd
 
 
 def precompute_continue_probabilities(
+    trajectories: List[Dict[str, Any]],
     feat_map: Dict[Tuple[str, int], np.ndarray],
+    hidden_map: Dict[Tuple[str, int], np.ndarray],
+    hidden_dim: int,
     bundle: Stage2ProbeBundle,
     cfg: Stage2Config,
 ) -> Dict[Tuple[str, int], float]:
-    return _precompute_probe_probs(feat_map, bundle.model, bundle.scaler, cfg)
+    if bundle.sequence_gru:
+        return _precompute_probe_probs_gru(
+            trajectories,
+            hidden_map,
+            hidden_dim,
+            cfg,
+            bundle.model,
+            bundle.scaler,
+        )
+    if bundle.seq_history_features:
+        return _precompute_probe_probs_autoreg_mlp(
+            trajectories,
+            hidden_map,
+            hidden_dim,
+            cfg,
+            bundle.model,
+            bundle.scaler,
+        )
+    return _precompute_probe_probs_from_map(feat_map, bundle.model, bundle.scaler, cfg)
 
 
 def shallow_features_from_map(

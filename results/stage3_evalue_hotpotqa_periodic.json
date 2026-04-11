@@ -1,0 +1,108 @@
+{
+  "dataset": "hotpotqa",
+  "gammas": [
+    0.5
+  ],
+  "alphas": [
+    0.1,
+    0.2
+  ],
+  "probe_checkpoint": "artifacts/probe/hotpotqa/probe_mlp_pdopt_binary_last_token.pt",
+  "betting_strategy": "predictive",
+  "outcome_aware": true,
+  "shift_type": "periodic",
+  "shift_fraction": 0.5,
+  "quality_use_probe_prob": true,
+  "shuffle_test_seed": 42,
+  "per_gamma": {
+    "0.5": {
+      "gamma": 0.5,
+      "quality_model_eval": {
+        "brier_score": 0.16221759744422312,
+        "ece": 0.031953459359968676,
+        "n_samples": 5000,
+        "positive_rate": 0.453000009059906
+      },
+      "per_alpha": {
+        "0.1": {
+          "evalue_quality_bar": 0.97,
+          "conformal_min_phat": 0.8705373994845768,
+          "summaries": {
+            "probe": {
+              "strategy": "Probe",
+              "avg_steps": 2.854,
+              "avg_cost": 0.1427,
+              "avg_f1": 0.5273038,
+              "avg_em": 0.411,
+              "error_rate": 0.441,
+              "n": 1000
+            },
+            "probe_evalue": {
+              "strategy": "Probe+E-value",
+              "avg_steps": 4.984,
+              "avg_cost": 0.24919999999999998,
+              "avg_f1": 0.476392,
+              "avg_em": 0.369,
+              "error_rate": 0.49,
+              "n": 1000
+            },
+            "probe_conformal_quantile": {
+              "strategy": "Probe+CP-quantile",
+              "avg_steps": 4.462,
+              "avg_cost": 0.22310000000000002,
+              "avg_f1": 0.4881634,
+              "avg_em": 0.377,
+              "error_rate": 0.477,
+              "n": 1000
+            }
+          },
+          "final_e_wealth": 9.999999990000001,
+          "wealth_cap": 10.0,
+          "plot_error_rate": "results/stage3_cum_error_hotpotqa_g0_5_a0_1_periodic.png",
+          "plot_wealth_trace": "results/stage3_wealth_hotpotqa_g0_5_a0_1_periodic.png"
+        },
+        "0.2": {
+          "evalue_quality_bar": 0.97,
+          "conformal_min_phat": 0.8118817146782409,
+          "summaries": {
+            "probe": {
+              "strategy": "Probe",
+              "avg_steps": 2.854,
+              "avg_cost": 0.1427,
+              "avg_f1": 0.5273038,
+              "avg_em": 0.411,
+              "error_rate": 0.441,
+              "n": 1000
+            },
+            "probe_evalue": {
+              "strategy": "Probe+E-value",
+              "avg_steps": 4.984,
+              "avg_cost": 0.24919999999999998,
+              "avg_f1": 0.476392,
+              "avg_em": 0.369,
+              "error_rate": 0.49,
+              "n": 1000
+            },
+            "probe_conformal_quantile": {
+              "strategy": "Probe+CP-quantile",
+              "avg_steps": 4.162,
+              "avg_cost": 0.20810000000000003,
+              "avg_f1": 0.4978967,
+              "avg_em": 0.386,
+              "error_rate": 0.467,
+              "n": 1000
+            }
+          },
+          "final_e_wealth": 4.9999999950000005,
+          "wealth_cap": 5.0,
+          "plot_error_rate": "results/stage3_cum_error_hotpotqa_g0_5_a0_2_periodic.png",
+          "plot_wealth_trace": "results/stage3_wealth_hotpotqa_g0_5_a0_2_periodic.png"
+        }
+      },
+      "plot_paths": {
+        "0.1": "results/stage3_cum_error_hotpotqa_g0_5_a0_1_periodic.png",
+        "0.2": "results/stage3_cum_error_hotpotqa_g0_5_a0_2_periodic.png"
+      }
+    }
+  }
+}

@@ -1,22 +1,33 @@
 from __future__ import annotations
 
 """
-停止策略仿真：输入为逐步「继续概率」、浅层特征与质量模型输出，与 Stage2 探针结构解耦。
+停止策略仿真：Probe / E-value 门控 / Conformal 门控 / 分布漂移。
 
-依赖 ``pretest.utils.weitzman.trajectory_cumulative_cost`` 仅用于汇总成本（与 Stage2 评估一致）。
+依赖 ``pretest.utils.weitzman.trajectory_cumulative_cost`` 仅用于汇总成本。
+所有仿真函数返回统一的 ``List[Dict]`` 行格式 + 可选的 wealth trace。
 """
 
 import math
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 
 import numpy as np
 from sklearn.pipeline import Pipeline
 
 from pretest.utils.weitzman import trajectory_cumulative_cost
 
-from stage3.evalue import EWealthTracker, betting_multiplier_indicator
+from stage3.evalue import (
+    BettingStrategy,
+    EWealthTracker,
+    betting_multiplier_indicator,
+    compute_betting_lambda,
+    outcome_aware_multiplier,
+)
 from stage3.quality_model import predict_success_prob
 
+
+# ---------------------------------------------------------------------------
+# 工具
+# ---------------------------------------------------------------------------
 
 def _sorted_steps(traj: Dict[str, Any]) -> List[Dict[str, Any]]:
     return sorted(traj.get("steps") or [], key=lambda s: int(s.get("step", 0)))
@@ -56,6 +67,140 @@ def _finalize_row(
     }
 
 
+# ---------------------------------------------------------------------------
+# Probe-only baseline（无门控）
+# ---------------------------------------------------------------------------
+
+def probe_stop_shallow_and_phat(
+    traj: Dict[str, Any],
+    continue_probs: Dict[Tuple[str, int], float],
+    shallow_by_step: Dict[Tuple[str, int], np.ndarray],
+    quality_model: Pipeline,
+    *,
+    cfg: Any,
+    probe_threshold: float,
+) -> Tuple[np.ndarray, float, Dict[str, Any]]:
+    """探针在 dev/calib 上的「自然停止」步，用于阈值校准。"""
+    sample_id = str(traj.get("id", ""))
+    steps = _sorted_steps(traj)
+    if not steps:
+        z0 = np.zeros((1,), dtype=np.float32)
+        return z0, 0.0, {}
+
+    chosen = steps[-1]
+    for step in steps:
+        k = int(step.get("step", 0))
+        if k >= cfg.max_k:
+            chosen = step
+            break
+        p_cont = continue_probs.get((sample_id, k))
+        if p_cont is None:
+            continue
+        if float(p_cont) >= float(probe_threshold):
+            continue
+        chosen = step
+        break
+
+    kf = int(chosen.get("step", 0))
+    z = shallow_by_step.get((sample_id, kf))
+    if z is None:
+        return np.zeros((1,), dtype=np.float32), 0.0, chosen
+    phat = float(predict_success_prob(quality_model, np.asarray(z).reshape(1, -1))[0])
+    return np.asarray(z, dtype=np.float32), phat, chosen
+
+
+# ---------------------------------------------------------------------------
+# E-value 门控 — 结果感知型（推荐）
+# ---------------------------------------------------------------------------
+
+def simulate_evalue_outcome_aware(
+    trajectories: Sequence[Dict[str, Any]],
+    continue_probs: Dict[Tuple[str, int], float],
+    shallow_by_step: Dict[Tuple[str, int], np.ndarray],
+    quality_model: Pipeline,
+    *,
+    cfg: Any,
+    probe_threshold: float,
+    gamma: float,
+    alpha: float,
+    quality_bar: float,
+    betting_strategy: BettingStrategy = "predictive",
+    betting_lambda: float = 0.5,
+) -> Tuple[List[Dict[str, Any]], List[float]]:
+    """
+    结果感知型 E-value 门控：
+
+    1. Probe 建议停止时，计算 p_hat
+    2. 若 p_hat < quality_bar → 强制继续（质量预测不达标）
+    3. 若允许停止 → 观测真实 F1 → 用 outcome_aware_multiplier 更新 wealth
+    4. 当 wealth 接近 1/α → 下一次停止前会更保守（wealth 越高说明累积错误越多）
+
+    每个样本处理完（无论是否提前停止）都会更新 wealth。
+    """
+    tracker = EWealthTracker(alpha=float(alpha))
+    rows: List[Dict[str, Any]] = []
+
+    for traj in trajectories:
+        sample_id = str(traj.get("id", ""))
+        steps = _sorted_steps(traj)
+        if not steps:
+            rows.append(_empty_outcome(cfg, gamma))
+            tracker.trace.append(tracker.wealth)
+            continue
+
+        chosen = steps[-1]
+        stopped_early = False
+
+        for step in steps:
+            k = int(step.get("step", 0))
+            if k >= cfg.max_k:
+                chosen = step
+                break
+
+            p_cont = continue_probs.get((sample_id, k))
+            if p_cont is None:
+                continue
+            if float(p_cont) >= float(probe_threshold):
+                continue
+
+            z = shallow_by_step.get((sample_id, k))
+            if z is None:
+                continue
+            phat = float(predict_success_prob(quality_model, z.reshape(1, -1))[0])
+
+            should_gate = (phat < float(quality_bar)) or tracker.exceeded_cap
+            if should_gate:
+                continue
+
+            chosen = step
+            stopped_early = True
+            break
+
+        f1 = float(chosen.get("f1", 0.0))
+        error = int(f1 < float(gamma))
+
+        z_final = shallow_by_step.get((sample_id, int(chosen.get("step", 0))))
+        if z_final is not None:
+            phat_final = float(predict_success_prob(quality_model, z_final.reshape(1, -1))[0])
+        else:
+            phat_final = 0.5
+
+        lam = compute_betting_lambda(
+            betting_strategy,
+            p_hat=phat_final,
+            fixed_lambda=betting_lambda,
+        )
+        tracker.apply_outcome(error, lam)
+
+        rows.append(_finalize_row(traj, chosen, cfg, gamma))
+
+    return rows, tracker.trace
+
+
+# ---------------------------------------------------------------------------
+# E-value 门控 — 原版 indicator（对照基线）
+# ---------------------------------------------------------------------------
+
 def simulate_evalue_gated_stops(
     trajectories: Sequence[Dict[str, Any]],
     continue_probs: Dict[Tuple[str, int], float],
@@ -69,19 +214,18 @@ def simulate_evalue_gated_stops(
     quality_bar: float,
 ) -> Tuple[List[Dict[str, Any]], List[float]]:
     """
-    顺序处理 ``trajectories``：探针要求停止时，若更新 E-wealth 会突破 1/α 则强制继续，否则接受停止并更新 wealth。
-    在必须结束的最后一步（k==max_k）仍按同样规则更新 wealth（乘子可能被裁剪）。
+    原版 indicator betting（保留做对照）：
+    Probe 要求停止时，若 E-wealth * multiplier 会突破 1/α 则强制继续。
     """
     tracker = EWealthTracker(alpha=float(alpha))
     rows: List[Dict[str, Any]] = []
-    wealth_trace: List[float] = []
 
     for traj in trajectories:
         sample_id = str(traj.get("id", ""))
         steps = _sorted_steps(traj)
         if not steps:
             rows.append(_empty_outcome(cfg, gamma))
-            wealth_trace.append(tracker.wealth)
+            tracker.trace.append(tracker.wealth)
             continue
 
         chosen = steps[-1]
@@ -127,10 +271,13 @@ def simulate_evalue_gated_stops(
             tracker.apply(m)
 
         rows.append(_finalize_row(traj, chosen, cfg, gamma))
-        wealth_trace.append(tracker.wealth)
 
-    return rows, wealth_trace
+    return rows, tracker.trace
 
+
+# ---------------------------------------------------------------------------
+# Conformal (split) 门控
+# ---------------------------------------------------------------------------
 
 def simulate_conformal_phat_gate(
     trajectories: Sequence[Dict[str, Any]],
@@ -144,8 +291,8 @@ def simulate_conformal_phat_gate(
     min_phat: float,
 ) -> List[Dict[str, Any]]:
     """
-    简单 split 型门控：探针想停时，额外要求 p_hat(F1≥γ) ≥ min_phat（min_phat 在 Calib 上按 (1-α) 分位校准）。
-    用于与 E-wealth 曲线对照，不涉及跨样本 wealth。
+    Split 型门控：Probe 想停时，额外要求 p_hat(F1≥γ) ≥ min_phat。
+    min_phat 在 Calib 上按 (1-α) 分位校准。无跨样本 wealth。
     """
     rows: List[Dict[str, Any]] = []
     mp = float(min_phat)
@@ -181,46 +328,8 @@ def simulate_conformal_phat_gate(
     return rows
 
 
-def probe_stop_shallow_and_phat(
-    traj: Dict[str, Any],
-    continue_probs: Dict[Tuple[str, int], float],
-    shallow_by_step: Dict[Tuple[str, int], np.ndarray],
-    quality_model: Pipeline,
-    *,
-    cfg: Any,
-    probe_threshold: float,
-) -> Tuple[np.ndarray, float, Dict[str, Any]]:
-    """探针在 dev/calib 上的「自然停止」步，用于阈值校准。"""
-    sample_id = str(traj.get("id", ""))
-    steps = _sorted_steps(traj)
-    if not steps:
-        z0 = np.zeros((1,), dtype=np.float32)
-        return z0, 0.0, {}
-
-    chosen = steps[-1]
-    for step in steps:
-        k = int(step.get("step", 0))
-        if k >= cfg.max_k:
-            chosen = step
-            break
-        p_cont = continue_probs.get((sample_id, k))
-        if p_cont is None:
-            continue
-        if float(p_cont) >= float(probe_threshold):
-            continue
-        chosen = step
-        break
-
-    kf = int(chosen.get("step", 0))
-    z = shallow_by_step.get((sample_id, kf))
-    if z is None:
-        return np.zeros((1,), dtype=np.float32), 0.0, chosen
-    phat = float(predict_success_prob(quality_model, np.asarray(z).reshape(1, -1))[0])
-    return np.asarray(z, dtype=np.float32), phat, chosen
-
-
 def conformal_min_phat_threshold(phat_stop: np.ndarray, alpha: float) -> float:
-    """Calib 上 probe 停止处的 p_hat 的保守下分位，用作 test 上允许停止的最小 p_hat。"""
+    """Calib 上 probe 停止处的 p_hat 的保守下分位。"""
     p = np.sort(np.asarray(phat_stop, dtype=np.float64).reshape(-1))
     n = int(p.size)
     if n == 0:
@@ -229,6 +338,86 @@ def conformal_min_phat_threshold(phat_stop: np.ndarray, alpha: float) -> float:
     idx = min(max(idx, 0), n - 1)
     return float(p[idx])
 
+
+# ---------------------------------------------------------------------------
+# 分布漂移序列构造
+# ---------------------------------------------------------------------------
+
+def build_shift_ordering(
+    trajectories: List[Dict[str, Any]],
+    *,
+    shift_type: Literal["none", "sudden", "gradual", "periodic"],
+    shift_fraction: float = 0.5,
+    shift_sort_key: str = "f1",
+    rng_seed: int = 42,
+) -> List[int]:
+    """
+    构造漂移测试序列的样本排列。
+
+    - none:    随机排列（基准）
+    - sudden:  前 fraction 按原序随机；后 (1-fraction) 全换成最难样本
+    - gradual: 按 shift_sort_key 升序排列（从易到难，模拟逐渐恶化）
+    - periodic: 交替排列 easy/hard batch（周期=10）
+    """
+    n = len(trajectories)
+    rng = np.random.RandomState(rng_seed)
+
+    if shift_type == "none":
+        return list(rng.permutation(n))
+
+    max_f1_per_traj = []
+    for i, traj in enumerate(trajectories):
+        steps = traj.get("steps") or []
+        if not steps:
+            max_f1_per_traj.append(0.0)
+            continue
+        max_f1 = max(float(s.get(shift_sort_key, 0.0) or 0.0) for s in steps)
+        max_f1_per_traj.append(max_f1)
+
+    sorted_by_difficulty = np.argsort(max_f1_per_traj)
+    easy_half = sorted_by_difficulty[n // 2:]
+    hard_half = sorted_by_difficulty[: n // 2]
+
+    if shift_type == "sudden":
+        cut = int(n * float(shift_fraction))
+        normal_part = list(rng.permutation(n)[:cut])
+        shift_part = list(hard_half[: n - cut])
+        if len(shift_part) < n - cut:
+            shift_part = list(rng.choice(hard_half, size=n - cut, replace=True))
+        rng.shuffle(shift_part)
+        return normal_part + shift_part
+
+    if shift_type == "gradual":
+        return list(reversed(sorted_by_difficulty))
+
+    if shift_type == "periodic":
+        period = 10
+        order: List[int] = []
+        easy_list = list(rng.permutation(easy_half))
+        hard_list = list(rng.permutation(hard_half))
+        ei, hi = 0, 0
+        for batch_idx in range(0, n, period):
+            if batch_idx // period % 2 == 0:
+                for _ in range(period):
+                    if ei < len(easy_list):
+                        order.append(int(easy_list[ei]))
+                        ei += 1
+            else:
+                for _ in range(period):
+                    if hi < len(hard_list):
+                        order.append(int(hard_list[hi]))
+                        hi += 1
+        while len(order) < n:
+            remaining = [i for i in range(n) if i not in set(order)]
+            order.extend(remaining)
+        return order[:n]
+
+    return list(rng.permutation(n))
+
+
+# ---------------------------------------------------------------------------
+# 错误标签 & 汇总
+# ---------------------------------------------------------------------------
 
 def attach_error_labels(rows: Sequence[Dict[str, Any]], gamma: float) -> List[Dict[str, Any]]:
     """为仅含 f1 的行补充 error = 1[f1 < γ]。"""

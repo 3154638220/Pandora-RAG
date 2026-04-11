@@ -3,10 +3,14 @@ from __future__ import annotations
 """
 在 Calib 上训练轻量质量预测器（逻辑回归），估计 P(F1≥γ|浅层特征)。
 
-仅依赖 numpy / sklearn；特征维度与 Stage2 的 SHALLOW_FEATURE_DIM 由调用方保证一致。
+支持两种特征集：
+  1. 仅浅层特征（原版）
+  2. 浅层特征 + Probe p_continue（增强版，零成本额外维）
+
+附带校准评估工具（Brier Score / ECE）。
 """
 
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from sklearn.linear_model import LogisticRegression
@@ -14,16 +18,22 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 
+# ---------------------------------------------------------------------------
+# 数据构建
+# ---------------------------------------------------------------------------
+
 def build_step_quality_dataset(
     trajectories: List[Dict[str, Any]],
     shallow_by_step: Dict[Tuple[str, int], np.ndarray],
     *,
     gamma: float,
     max_k: int,
+    probe_probs: Optional[Dict[Tuple[str, int], float]] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    每一步一行：特征为浅层向量，标签为 1[该步 F1 >= γ]。
-    与 plan 中「Calib 上训练质量预测器」一致；使用全步可增广样本量。
+    每一步一行：特征为浅层向量（可选拼 probe p_continue），标签为 1[该步 F1 >= γ]。
+
+    若 probe_probs 非 None，则在浅层向量末尾拼一维 p_continue，可提升质量模型。
     """
     xs: List[np.ndarray] = []
     ys: List[float] = []
@@ -39,13 +49,21 @@ def build_step_quality_dataset(
             vec = shallow_by_step.get((sid, k))
             if vec is None:
                 continue
+            base = np.asarray(vec, dtype=np.float32).reshape(-1)
+            if probe_probs is not None:
+                p_cont = float(probe_probs.get((sid, k), 0.5))
+                base = np.append(base, np.float32(p_cont))
             f1 = float(step.get("f1", 0.0) or 0.0)
-            xs.append(np.asarray(vec, dtype=np.float32).reshape(-1))
+            xs.append(base)
             ys.append(1.0 if f1 >= float(gamma) else 0.0)
     if not xs:
         raise RuntimeError("质量模型：Calib 上无有效 (浅层特征, 标签) 样本。")
     return np.stack(xs, axis=0), np.asarray(ys, dtype=np.float32)
 
+
+# ---------------------------------------------------------------------------
+# 训练
+# ---------------------------------------------------------------------------
 
 def train_quality_logreg(
     x: np.ndarray,
@@ -71,14 +89,21 @@ def train_quality_logreg(
     return pipe
 
 
+# ---------------------------------------------------------------------------
+# 推理
+# ---------------------------------------------------------------------------
+
 def predict_success_prob(model: Pipeline, x: np.ndarray) -> np.ndarray:
     """返回正类（F1≥γ）概率。"""
     proba = model.predict_proba(x.astype(np.float64, copy=False))
-    # 正类列索引：sklearn 按标签排序，0/1 二分类时列为 [p0, p1]
     if proba.shape[1] < 2:
         return proba[:, 0]
     return proba[:, 1]
 
+
+# ---------------------------------------------------------------------------
+# 阈值调优
+# ---------------------------------------------------------------------------
 
 def tune_quality_bar_on_calib(
     p_hat_stop: np.ndarray,
@@ -88,8 +113,8 @@ def tune_quality_bar_on_calib(
 ) -> float:
     """
     在 Calib 上，仅使用「探针自然停止步」上的 (p_hat, error)。
-    在 [0,1] 上网格搜索 quality_bar，使得 p_hat >= bar 的子集中经验错误率 <= target_error，
-    并取满足条件的最大 bar（更保守的下注门槛）。
+    在 [0,1] 上网格搜索 quality_bar，使得 p_hat >= bar 的子集中
+    经验错误率 <= target_error，并取满足条件的最大 bar。
     """
     ph = np.asarray(p_hat_stop, dtype=np.float64).reshape(-1)
     er = np.asarray(error_stop, dtype=np.float64).reshape(-1)
@@ -105,3 +130,49 @@ def tune_quality_bar_on_calib(
         if rate <= float(target_error) + 1e-9:
             best = float(bar)
     return best
+
+
+# ---------------------------------------------------------------------------
+# 校准评估
+# ---------------------------------------------------------------------------
+
+def brier_score(y_true: np.ndarray, y_prob: np.ndarray) -> float:
+    """Brier Score：越小越好，完美校准 = 0。"""
+    yt = np.asarray(y_true, dtype=np.float64).reshape(-1)
+    yp = np.asarray(y_prob, dtype=np.float64).reshape(-1)
+    return float(np.mean((yp - yt) ** 2))
+
+
+def expected_calibration_error(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    n_bins: int = 10,
+) -> float:
+    """ECE（Expected Calibration Error）：分 bin 后加权平均 |accuracy - confidence|。"""
+    yt = np.asarray(y_true, dtype=np.float64).reshape(-1)
+    yp = np.asarray(y_prob, dtype=np.float64).reshape(-1)
+    bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
+    ece = 0.0
+    for lo, hi in zip(bin_edges[:-1], bin_edges[1:]):
+        mask = (yp >= lo) & (yp < hi + 1e-12)
+        if not np.any(mask):
+            continue
+        acc = float(np.mean(yt[mask]))
+        conf = float(np.mean(yp[mask]))
+        ece += float(np.sum(mask)) / float(len(yt)) * abs(acc - conf)
+    return ece
+
+
+def evaluate_quality_model(
+    model: Pipeline,
+    x: np.ndarray,
+    y: np.ndarray,
+) -> Dict[str, float]:
+    """返回 Brier Score 和 ECE 的字典。"""
+    probs = predict_success_prob(model, x)
+    return {
+        "brier_score": brier_score(y, probs),
+        "ece": expected_calibration_error(y, probs),
+        "n_samples": int(len(y)),
+        "positive_rate": float(np.mean(y)),
+    }
