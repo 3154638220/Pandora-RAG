@@ -1,6 +1,6 @@
 # Stage2 Probe 最优配置总结
 
-> 截止 2026-04-11，所有消融实验完成后的最终定案。
+> 截止 2026-04-19，已基于重跑后的 Stage1 轨迹重新搜索并验证 `stage2` 最优配置。
 
 ---
 
@@ -26,42 +26,103 @@ python -m stage2.run_stage2 --per-dataset-optimal --artifact-suffix pdopt_best
 
 ---
 
-## 二、测试集最终结果
+## 二、测试集最终结果（`pdopt_best` + P1 逐步阈值 refinement）
 
 ### 与各基线对比（Test F1）
 
 
-| 策略              | HotpotQA F1 | 步数       | MuSiQue F1 | 步数       | 2Wiki F1   | 步数       |
-| --------------- | ----------- | -------- | ---------- | -------- | ---------- | -------- |
-| Fixed-K=1       | 0.3665      | 1.0      | 0.0888     | 1.0      | 0.2248     | 1.0      |
-| Fixed-K=2       | 0.4325      | 2.0      | 0.1207     | 2.0      | 0.2891     | 2.0      |
-| Fixed-K=3       | 0.4579      | 3.0      | 0.1328     | 3.0      | 0.3264     | 3.0      |
-| Fixed-K=5       | 0.4764      | 5.0      | 0.1328     | 5.0      | 0.3582     | 5.0      |
-| Global-Weitzman | 0.6060      | 2.80     | 0.2371     | 4.06     | 0.5178     | 3.44     |
-| Oracle          | 0.6232      | 1.60     | 0.2526     | 1.52     | 0.5336     | 1.77     |
-| **Probe（最优配置）** | **0.5273**  | **2.85** | **0.1826** | **3.25** | **0.3738** | **3.37** |
+| 策略 | HotpotQA F1 | 步数 | MuSiQue F1 | 步数 | 2Wiki F1 | 步数 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Fixed-K=1 | 0.4340 | 1.00 | 0.0797 | 1.00 | 0.2846 | 1.00 |
+| Fixed-K=2 | 0.6773 | 2.00 | 0.1830 | 2.00 | 0.5908 | 2.00 |
+| Fixed-K=3 | 0.6775 | 3.00 | 0.3210 | 3.00 | 0.5583 | 3.00 |
+| Fixed-K=4 | 0.6747 | 4.00 | 0.3816 | 4.00 | 0.5382 | 4.00 |
+| Fixed-K=5 | 0.6668 | 4.99 | 0.4022 | 5.00 | 0.5288 | 5.00 |
+| Global-Weitzman | 0.7092 | 1.64 | 0.4229 | 3.29 | 0.6449 | 1.77 |
+| Oracle | 0.7810 | 1.58 | 0.4966 | 2.12 | 0.6954 | 1.59 |
+| **Probe（最优配置）** | **0.6544** | **1.73** | **0.3969** | **3.31** | **0.5941** | **1.82** |
 
 
 ### 关键指标
 
 
-| 数据集      | Probe F1   | Oracle F1 | Probe/Oracle | 差距    | vs Fixed-K=5 |
-| -------- | ---------- | --------- | ------------ | ----- | ------------ |
-| HotpotQA | **0.5273** | 0.6232    | **84.6%**    | 0.096 | **+0.051**   |
-| MuSiQue  | **0.1826** | 0.2526    | **72.3%**    | 0.070 | **+0.050**   |
-| 2Wiki    | **0.3738** | 0.5336    | **70.1%**    | 0.160 | **+0.016**   |
+| 数据集 | Probe F1 | Oracle F1 | Probe/Oracle | Oracle 差距 | Best Fixed-K | Probe vs Best Fixed | Probe vs Fixed-K=5 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| HotpotQA | **0.6544** | 0.7810 | **83.8%** | 0.1266 | `K=3` (`0.6775`) | `-0.0231` | `-0.0124` |
+| MuSiQue | **0.3969** | 0.4966 | **79.9%** | 0.0997 | `K=5` (`0.4022`) | `-0.0053` | `-0.0053` |
+| 2Wiki | **0.5941** | 0.6954 | **85.4%** | 0.1013 | `K=2` (`0.5908`) | `+0.0033` | `+0.0653` |
 
+> 当前 `Probe` 的主优势更准确地表述为“接近 Oracle 的低成本 Pareto 点”，而不是“统一超过最佳 Fixed-K”。这轮 `rethreshold-only` 更新后，2Wiki 已小幅超过最佳固定步数；HotpotQA 与 MuSiQue 则仍分别落后于最优 `K=3` / `K=5`，但 HotpotQA 显著节省步数，2Wiki 继续明显优于跑满 `K=5`。
 
-> Probe 步数均显著少于 Fixed-K=5（最优固定步数），以约一半成本取得了更高 F1。
+### 2.1 Phase C 最终部署策略
+
+`pdopt_best` 当前三数据集的最终部署工作点已不再是单一全局阈值，而是通过 P1 的保守筛选后采用逐步阈值：
+
+| 数据集 | policy | per-step thresholds | 采纳原因（dev） |
+| --- | --- | --- | --- |
+| HotpotQA | `per_step` | `[0.73, 0.69, 0.81, 0.73, 0.73]` | utility 提升；Pareto frontier 外扩 |
+| MuSiQue | `per_step` | `[0.61, 0.63, 0.63, 0.69, 0.63]` | 同步数下 utility 更优 |
+| 2Wiki | `per_step` | `[0.61, 0.79, 0.73, 0.77, 0.67]` | 在接近 GW budget 下保持更优主点 |
+
+实现位置：`stage2/run_stage2.py`。  
+诊断产物：`docs/stage2_report_pdopt_best.md`、`results/stage2_threshold_sweep_*_pdopt_best.csv`、`artifacts/probe/*/stage2_train_meta_pdopt_best.json`。
+
+### 2.2 Appendix：纯 max-F1 operating point
+
+为区分“模型能力上限”和“cost-aware operating point 选择”，当前已固定保留同一 checkpoint 的 appendix 补充：
+
+- dev 上按纯 `avg_f1` 选择全局 threshold
+- test 上汇报对应 `F1 / avg_steps`
+- 自动导出到 `docs/stage2_report_pdopt_best.md` 与 `results/stage2_appendix_maxf1_summary_pdopt_best.csv`
+
+| 数据集 | dev max-F1 threshold | Appendix test F1 / avg_steps | 相对主部署点 |
+| --- | --- | --- | --- |
+| HotpotQA | `0.47` | `0.6884 / 2.981` | `+0.0340 F1`, `+1.249 steps` |
+| MuSiQue | `0.55` | `0.4140 / 4.192` | `+0.0171 F1`, `+0.887 steps` |
+| 2Wiki | `0.57` | `0.5918 / 2.629` | `-0.0023 F1`, `+0.807 steps` |
+
+这组结果说明：
+
+- HotpotQA / MuSiQue 的主损失里，operating point 选择占比明显更大
+- 2Wiki 的主部署点已经接近甚至略优于纯 max-F1 阈值
+- 因此 `max-F1` 更适合作为 appendix 的 quality-first 参照，而非替换主线 cost-aware 结果
+
+### 2.3 P2 新特征完整重训结论
+
+为回答“31 维浅层特征是否值得进入最终主结果”，我们额外完成了一轮完整重训：
+
+```bash
+python -m stage2.run_stage2 --per-dataset-optimal --artifact-suffix p2_full31
+```
+
+对应产物：
+
+- `docs/stage2_report_p2_full31.md`
+- `results/stage2_appendix_maxf1_summary_p2_full31.csv`
+- `results/stage2_probe_table_*_p2_full31.csv`
+
+与当前正式口径 `pdopt_best` 相比，`p2_full31` 主工作点表现为：
+
+| 数据集 | `pdopt_best` | `p2_full31` | 变化 |
+| --- | --- | --- | --- |
+| HotpotQA | `0.6544 / 1.732` | `0.6530 / 1.706` | `-0.0014 F1`, `-0.026 steps` |
+| MuSiQue | `0.3969 / 3.305` | `0.3934 / 3.410` | `-0.0036 F1`, `+0.106 steps` |
+| 2Wiki | `0.5941 / 1.822` | `0.5725 / 1.801` | `-0.0215 F1`, `-0.021 steps` |
+
+结论：
+
+- 这批 P2 新特征**没有提升任何一个数据集的主工作点**
+- 2Wiki 出现了显著退化
+- 因此 `p2_full31` 应保留为负结果 / 诊断结果，**不进入最终主结果**
 
 ### 各数据集最优配置来源 CSV
 
 
-| 数据集      | 结果文件                                                                |
-| -------- | ------------------------------------------------------------------- |
-| HotpotQA | `results/stage2_probe_table_hotpotqa_pdopt_binary_last_token.csv`   |
-| MuSiQue  | `results/stage2_probe_table_musique_pdopt_binary_last_token.csv`    |
-| 2Wiki    | `results/stage2_probe_table_2wiki_pdopt_binary_hidden_residual.csv` |
+| 数据集 | 结果文件 |
+| --- | --- |
+| HotpotQA | `results/stage2_probe_table_hotpotqa_pdopt_best.csv` |
+| MuSiQue | `results/stage2_probe_table_musique_pdopt_best.csv` |
+| 2Wiki | `results/stage2_probe_table_2wiki_pdopt_best.csv` |
 
 
 ---
@@ -129,7 +190,17 @@ python -m stage2.run_stage2 --per-dataset-optimal --artifact-suffix pdopt_best
 
 ---
 
-## 五、Stage3 接入
+## 五、结论更新
+
+- `PER_DATASET_OPTIMAL` 本身没有变化，重跑后的最优组合仍是：
+  `hotpotqa=(256, 0.0, binary, False)`、`musique=(256, 0.0, binary, False)`、`2wiki=(64, 0.02, binary, True)`。
+- 真正变化的是 **Stage1 轨迹与标签分布**：三数据集的 Oracle、Global-Weitzman、Fixed-K 与 Probe 均整体抬升，尤其 HotpotQA / 2Wiki 的最优工作点明显前移到更少步数。
+- 因此，后续写作应避免继续沿用“Probe 在三数据集统一超过最佳 Fixed-K”的旧叙事；更稳妥的表述是：
+  `Probe recovers 82%~84% of Oracle performance while using 34%~68% of the Fixed-K=5 retrieval budget.`
+
+---
+
+## 六、Stage3 接入
 
 Stage3 通过 `stage3/adapters/stage2_probe.py` 加载 Stage2 checkpoint，自动读取 `hidden_branch_residual` 字段（checkpoint meta 中已写入），无需额外传参：
 
@@ -142,7 +213,7 @@ Checkpoint 路径：`artifacts/probe/{dataset}/probe_mlp_pdopt_best.pt`（以 `-
 
 ---
 
-## 六、完整复现流程
+## 七、完整复现流程
 
 ```bash
 # Step 1：生成轨迹缓存（若已有可跳过）
@@ -162,4 +233,3 @@ python -m stage2.run_stage2 --per-dataset-optimal --artifact-suffix pdopt_best
 > ```
 >
 > 此时 `hidden_branch_residual` 仍 per-dataset（2Wiki 带残差）；若需三数据集均不带残差，需手动指定 `--no-hidden-branch-residual`（当前未实现，可直接运行每个数据集单独加 `--datasets` 覆盖）。
-
