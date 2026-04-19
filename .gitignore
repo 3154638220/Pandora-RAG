@@ -50,6 +50,7 @@ Thumbs.db
 *.ipynb_checkpoints
 
 # --- Hugging Face & generic ML caches ---
+.hf_cache/
 .cache/
 **/.cache/huggingface/
 
@@ -67,6 +68,11 @@ Thumbs.db
 # --- 本仓库：可再生的中间数据与轨迹（若需版本化某子集，可改为更细规则） ---
 cache/
 artifacts/
+/checkpoints/**
+/logs/**
+/models/**
+/data/raw/
+/data/corpus/
 data/processed/
 
 # --- Logs ---
@@ -88,3 +94,16 @@ dmypy.json
 
 # --- 实验跟踪（若使用） ---
 wandb/
+
+# --- External baseline repositories ---
+baselines/Stop-RAG/
+
+# --- Stop-RAG snapshot: keep code and lightweight records only ---
+baselines/stop-rag-pandora/data/
+baselines/stop-rag-pandora/outputs/**/*.bin
+baselines/stop-rag-pandora/outputs/**/*.safetensors
+baselines/stop-rag-pandora/outputs/**/optimizer.pt
+baselines/stop-rag-pandora/outputs/**/scheduler.pt
+baselines/stop-rag-pandora/outputs/**/rng_state.pth
+baselines/stop-rag-pandora/results/**/*.jsonl
+!baselines/stop-rag-pandora/stop_rag_dataset_run.log
