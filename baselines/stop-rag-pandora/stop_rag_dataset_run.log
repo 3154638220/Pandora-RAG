@@ -1,8 +1,0 @@
-=== dataset hotpotqa ===
-stop-rag dataset.sh: STOP_RAG_MAX_ITERATIONS=5 STOP_RAG_REPEAT_SIZE=1
-Traceback (most recent call last):
-  File "<frozen runpy>", line 198, in _run_module_as_main
-  File "<frozen runpy>", line 88, in _run_code
-  File "/home/x12dpg/hjx/Pandora-RAG/baselines/Stop-RAG/src/pipeline/pipeline.py", line 11, in <module>
-    from vllm import LLM
-ModuleNotFoundError: No module named 'vllm'

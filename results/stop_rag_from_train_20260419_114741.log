@@ -1,0 +1,135 @@
+=== Stop-RAG 续跑（仅训练+选参+测试）| nproc=3 tp=2 | /home/x12dpg/hjx/Pandora-RAG/results/stop_rag_from_train_20260419_114741.log ===
+=== train.sh hotpotqa ===
+/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/transformers/convert_slow_tokenizer.py:566: UserWarning: The sentencepiece tokenizer that you are converting to a fast tokenizer uses the byte fallback option which is not implemented in the fast tokenizers. In practice this means that the fast version of the tokenizer can produce unknown tokens whereas the sentencepiece version would have converted these unknown tokens into a sequence of byte tokens matching the original piece of text.
+  warnings.warn(
+The tokenizer you are loading from 'microsoft/deberta-v3-large' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+Model and tokenizer loaded successfully.
+Trainable params: 436,113,410 || All params: 436,113,410 || Trainable%: 100.00%
+Using the `WANDB_DISABLED` environment variable is deprecated and will be removed in v5. Use the --report_to flag to control the integrations used for logging result (for instance --report_to none).
+Number of training samples: 12742
+Number of evaluation samples: 1412
+The tokenizer has new PAD/BOS/EOS tokens that differ from the model config and generation config. The model config and generation config were aligned accordingly, being updated with the tokenizer's values. Updated tokens: {'eos_token_id': 2, 'bos_token_id': 1, 'pad_token_id': 0}.
+  0%|          | 0/2391 [00:00<?, ?it/s]  0%|          | 1/2391 [00:02<1:24:32,  2.12s/it]  0%|          | 2/2391 [00:03<1:05:33,  1.65s/it][rank0]: Traceback (most recent call last):
+[rank0]:   File "<frozen runpy>", line 198, in _run_module_as_main
+[rank0]:   File "<frozen runpy>", line 88, in _run_code
+[rank0]:   File "/home/x12dpg/hjx/Pandora-RAG/baselines/Stop-RAG/src/train/stop_rag_train.py", line 734, in <module>
+[rank0]:     main(args)
+[rank0]:   File "/home/x12dpg/hjx/Pandora-RAG/baselines/Stop-RAG/src/train/stop_rag_train.py", line 723, in main
+[rank0]:     trainer.train(resume_from_checkpoint=True if args.run_id else False)
+[rank0]:   File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/transformers/trainer.py", line 2325, in train
+[rank0]:     return inner_training_loop(
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/transformers/trainer.py", line 2674, in _inner_training_loop
+[rank0]:     tr_loss_step = self.training_step(model, inputs, num_items_in_batch)
+[rank0]:                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/transformers/trainer.py", line 4020, in training_step
+[rank0]:     loss = self.compute_loss(model, inputs, num_items_in_batch=num_items_in_batch)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/x12dpg/hjx/Pandora-RAG/baselines/Stop-RAG/src/train/stop_rag_train.py", line 396, in compute_loss
+[rank0]:     outputs = model(
+[rank0]:               ^^^^^^
+[rank0]:   File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/accelerate/utils/operations.py", line 823, in forward
+[rank0]:     return model_forward(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/accelerate/utils/operations.py", line 811, in __call__
+[rank0]:     return convert_to_fp32(self.model_forward(*args, **kwargs))
+[rank0]:                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/torch/amp/autocast_mode.py", line 44, in decorate_autocast
+[rank0]:     return func(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/x12dpg/hjx/Pandora-RAG/baselines/Stop-RAG/src/train/stop_rag_train.py", line 243, in forward
+[rank0]:     outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
+[rank0]:               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/transformers/models/deberta_v2/modeling_deberta_v2.py", line 784, in forward
+[rank0]:     encoder_outputs = self.encoder(
+[rank0]:                       ^^^^^^^^^^^^^
+[rank0]:   File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/transformers/models/deberta_v2/modeling_deberta_v2.py", line 657, in forward
+[rank0]:     output_states, attn_weights = layer_module(
+[rank0]:                                   ^^^^^^^^^^^^^
+[rank0]:   File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/transformers/modeling_layers.py", line 94, in __call__
+[rank0]:     return super().__call__(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/transformers/models/deberta_v2/modeling_deberta_v2.py", line 436, in forward
+[rank0]:     attention_output, att_matrix = self.attention(
+[rank0]:                                    ^^^^^^^^^^^^^^^
+[rank0]:   File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/transformers/models/deberta_v2/modeling_deberta_v2.py", line 369, in forward
+[rank0]:     self_output, att_matrix = self.self(
+[rank0]:                               ^^^^^^^^^^
+[rank0]:   File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/transformers/models/deberta_v2/modeling_deberta_v2.py", line 250, in forward
+[rank0]:     rel_att = self.disentangled_attention_bias(
+[rank0]:               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/transformers/models/deberta_v2/modeling_deberta_v2.py", line 347, in disentangled_attention_bias
+[rank0]:     score += p2c_att / scale.to(dtype=p2c_att.dtype)
+[rank0]:              ~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[rank0]: torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 108.00 MiB. GPU 0 has a total capacity of 23.64 GiB of which 102.81 MiB is free. Including non-PyTorch memory, this process has 23.53 GiB memory in use. Of the allocated memory 22.71 GiB is allocated by PyTorch, and 408.37 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+  0%|          | 2/2391 [00:04<1:30:36,  2.28s/it]
+[rank0]:[W419 11:47:53.671334012 ProcessGroupNCCL.cpp:1553] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+E0419 11:47:54.557000 2074252 site-packages/torch/distributed/elastic/multiprocessing/api.py:984] failed (exitcode: 1) local_rank: 0 (pid: 2074327) of binary: /home/x12dpg/miniconda3/envs/pandora-rag/bin/python3.11
+Traceback (most recent call last):
+  File "/home/x12dpg/miniconda3/envs/pandora-rag/bin/torchrun", line 6, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 362, in wrapper
+    return f(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/torch/distributed/run.py", line 991, in main
+    run(args)
+  File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/torch/distributed/run.py", line 982, in run
+    elastic_launch(
+  File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/torch/distributed/launcher/api.py", line 170, in __call__
+    return launch_agent(self._config, self._entrypoint, list(args))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/torch/distributed/launcher/api.py", line 317, in launch_agent
+    raise ChildFailedError(
+torch.distributed.elastic.multiprocessing.errors.ChildFailedError: 
+============================================================
+src.train.stop_rag_train FAILED
+------------------------------------------------------------
+Failures:
+  <NO_OTHER_FAILURES>
+------------------------------------------------------------
+Root Cause (first observed failure):
+[0]:
+  time      : 2026-04-19_11:47:54
+  host      : x12dpg-Super-Server
+  rank      : 0 (local_rank: 0)
+  exitcode  : 1 (pid: 2074327)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+============================================================

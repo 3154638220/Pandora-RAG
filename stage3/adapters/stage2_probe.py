@@ -45,6 +45,7 @@ class Stage2ProbeBundle:
     hidden_state_key: str
     seq_history_features: bool = False
     sequence_gru: bool = False
+    probe_feature_mode: str = "full"
 
 
 def default_probe_checkpoint_path(cfg: Stage2Config, dataset: str) -> Path:
@@ -99,6 +100,24 @@ def load_stage2_probe_bundle(checkpoint: Path, device: torch.device) -> Stage2Pr
     arch = str(ckpt.get("probe_arch", "mlp_v2"))
     seq_hist = bool(ckpt.get("seq_history_features", False))
     seq_gru = bool(ckpt.get("sequence_gru", False))
+    state_dict = ckpt["model_state_dict"]
+
+    # Some newer Stage2 checkpoints carry stale width metadata even though the
+    # saved weights are correct; infer runtime dims from state_dict when needed.
+    compress_dim = int(ckpt.get("compress_dim") or 0)
+    if "lin_h.weight" in state_dict:
+        compress_dim = int(state_dict["lin_h.weight"].shape[0])
+
+    fuse_dim = int(ckpt.get("fuse_dim") or 0)
+    if "classifier.0.weight" in state_dict:
+        fuse_dim = int(state_dict["classifier.0.weight"].shape[0])
+
+    gru_hidden_dim = int(ckpt.get("gru_hidden_dim") or 0)
+    if "gru.weight_hh_l0" in state_dict:
+        gru_hidden_dim = int(state_dict["gru.weight_hh_l0"].shape[1])
+    hidden_branch_residual = bool(ckpt.get("hidden_branch_residual", False))
+    if any(k.startswith("residual_h.") for k in state_dict):
+        hidden_branch_residual = True
 
     if shallow_only:
         model = ProbeMLP(sdim, int(ckpt["mlp_hidden_dim"]), dropout).to(device)
@@ -106,20 +125,20 @@ def load_stage2_probe_bundle(checkpoint: Path, device: torch.device) -> Stage2Pr
         model = ProbeMLP_v2(
             int(ckpt["stage1_hidden_dim"]),
             sdim,
-            int(ckpt["compress_dim"]),
-            int(ckpt["fuse_dim"]),
+            compress_dim,
+            fuse_dim,
             dropout,
-            hidden_branch_residual=bool(ckpt.get("hidden_branch_residual", False)),
+            hidden_branch_residual=hidden_branch_residual,
         ).to(device)
     elif arch == "mlp_v2_gru":
         model = ProbeSequenceGRU(
             int(ckpt["stage1_hidden_dim"]),
             sdim,
-            int(ckpt["compress_dim"]),
-            int(ckpt["fuse_dim"]),
-            int(ckpt.get("gru_hidden_dim") or 128),
+            compress_dim,
+            fuse_dim,
+            gru_hidden_dim or 128,
             dropout,
-            hidden_branch_residual=bool(ckpt.get("hidden_branch_residual", False)),
+            hidden_branch_residual=hidden_branch_residual,
         ).to(device)
     else:
         raise ValueError(
@@ -147,6 +166,7 @@ def load_stage2_probe_bundle(checkpoint: Path, device: torch.device) -> Stage2Pr
         hidden_state_key=str(ckpt.get("hidden_state_key", "last_token")),
         seq_history_features=seq_hist,
         sequence_gru=seq_gru,
+        probe_feature_mode=str(ckpt.get("probe_feature_mode", "full")),
     )
 
 

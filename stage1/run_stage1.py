@@ -14,6 +14,8 @@ Usage:
 若已有轨迹但缺 .npz，可用 ``--skip-prepare --reextract-hidden-only`` 仅从 trajectories.jsonl 重提（不重复调用 LLM）。
 若某 split 的 trajectories.jsonl 条数少于 data/processed 下对应 jsonl，说明该 split 轨迹未跑满；可用 ``--skip-prepare --collect-splits train`` 只补跑指定 split 的检索+LLM+每步 hidden（其余 split 沿用已有缓存）。
 
+``--skip-prepare`` 表示「跳过已具备完整 ``data/processed`` 与 manifest 的数据集的 prepare」；若多数据集串联时某一数据集尚缺这些文件，则**仅对该数据集自动执行** ``prepare_data``（从 HF 拉取并写出），不会重算已有产物的数据集。
+
 数据划分默认 Train=4000 / Calib=1000 / Dev=1000 / Test=1000；无独立 test split 时从 validation 划 test，
 若 validation 总条数不足 Calib+Dev+Test，则自动收窄 test（保证 Calib/Dev 满额），详见 docs/experiments.md A2。
 NLI 默认 CPU（NLI_DEVICE）。权重可放任意盘：设 NLI_MODEL_DIR 指向本地下载目录
@@ -29,8 +31,10 @@ import math
 import os
 import random
 import re
+import threading
 import time
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -42,6 +46,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from pretest.hf_env import init_pandora_hf_home
+
+init_pandora_hf_home()
+
 # 未设置 HF_ENDPOINT 时默认走 hf-mirror，减轻国内直连 huggingface.co 的延迟。
 if os.environ.get("PANDORA_NO_CN_HF_MIRROR", "").lower() not in ("1", "true", "yes"):
     if not (os.environ.get("HF_ENDPOINT") or "").strip():
@@ -52,19 +60,22 @@ from tqdm import tqdm
 
 from pretest.utils.llm_client import LLMClient
 from pretest.utils.metrics import compute_metrics
-from pretest.utils.retriever import BM25Retriever
+from pretest.utils.retriever import BM25Retriever, ContrieverBgeRetriever
 from pretest.utils.weitzman import (
     compute_all_reservation_values,
     compute_trajectory_oracle,
     oracle_stopping_simulation,
     trajectory_cumulative_cost,
 )
+from qa_shared.prompts import append_trace_step, format_answer_prompt
 
 # Hugging Face 上可用的 Parquet 镜像（旧名 musique / 2wikimultihopqa 已不可用）
+# hotpotqa：datasets>=3 下官方脚本含已废弃的 List feature；用 Hub ``refs/convert/parquet`` 下的
+# ``distractor/`` 目录（load_dataset(..., data_dir="distractor")），勿再传 config 名 ``distractor``。
 HF_DATASET_IDS = {
-    "hotpotqa": ("hotpot_qa", "distractor"),
-    "musique": ("dgslibisey/MuSiQue", None),
-    "2wiki": ("framolfese/2WikiMultihopQA", None),
+    "hotpotqa": ("hotpot_qa", None, "refs/convert/parquet", "distractor"),
+    "musique": ("dgslibisey/MuSiQue", None, None, None),
+    "2wiki": ("framolfese/2WikiMultihopQA", None, None, None),
 }
 
 # 勿请求 HF 的 test split，由 prepare_data 从 validation 尾部切出 test：
@@ -86,14 +97,25 @@ class Stage1Config:
     calib_quota: int = 1000
     dev_quota: int = 1000
     test_quota: int = 1000
-    temperature: float = 0.7
-    n_samples: int = 10
+    temperature: float = 0.0
+    n_samples: int = 1
     cost_per_step: float = 0.05
     oracle_cost_metric: str = "fixed"
     embed_dim: int = 256
     hidden_state_model: Optional[str] = None
     hidden_state_max_length: int = 2048
     root_dir: Path = Path(".")
+    # 迭代检索后端：bm25（默认）或 contriever_bge（facebook/contriever-msmarco + BAAI/bge-reranker-v2-m3）
+    retriever_backend: str = "bm25"
+    contriever_model_id: str = "facebook/contriever-msmarco"
+    reranker_model_id: str = "BAAI/bge-reranker-v2-m3"
+    contriever_shortlist_k: int = 32
+    rerank_batch_size: int = 8
+    retriever_device: Optional[str] = None
+    # 并行 worker 数（多线程并发 item 处理，LLM 调用并发，本地模型推理加锁串行）
+    num_workers: int = 1
+    # 跳过每步 self_eval HTTP 调用（节省 50% LLM 请求，self_eval_score 记为 0）
+    skip_self_eval: bool = False
 
     @property
     def data_processed_dir(self) -> Path:
@@ -274,7 +296,7 @@ def _resolve_hidden_state_device(torch_module: Any) -> str:
 
 def _resolve_local_llama_weights_dir(cfg: Stage1Config) -> Optional[Path]:
     """
-    解析 Meta-Llama-3.1-8B-Instruct 本地权重目录（与 docs/STORAGE_LAYOUT.md 一致：仓库内 models/ 常 symlink 到 haoge）。
+    解析 Meta-Llama-3.1-8B-Instruct 本地权重目录（见 docs/STORAGE_LAYOUT.md：优先 --root-dir、再仓库 models/、再 PANDORA_MODELS_ROOT）。
     顺序：--root-dir 下 models/ → 本仓库根目录 models/ → 环境变量 PANDORA_MODELS_ROOT。
     """
     name = "Meta-Llama-3.1-8B-Instruct"
@@ -338,13 +360,7 @@ class HiddenStateExtractor:
         )
 
     def extract(self, question: str, context: str, answer: str) -> Tuple[np.ndarray, np.ndarray]:
-        prompt = (
-            "你是一个严谨的问答助手。请根据以下检索到的上下文回答问题。\n"
-            "如无法确定，仍需给出最佳猜测，请直接输出答案（一个词组或短语），不要解释。\n\n"
-            f"问题：{question}\n\n"
-            f"已检索上下文：\n{context}\n\n"
-            f"答案：{answer}"
-        )
+        prompt = format_answer_prompt(question=question, context=context, answer=answer)
         encoded = self.tokenizer(
             prompt,
             return_tensors="pt",
@@ -516,30 +532,21 @@ def _missing_prepared_artifacts(cfg: Stage1Config, dataset_name: str) -> List[Pa
     return [p for p in required if not p.exists()]
 
 
-def _validate_skip_prepare_inputs(cfg: Stage1Config, dataset_name: str) -> None:
-    missing = _missing_prepared_artifacts(cfg, dataset_name)
-    if not missing:
-        return
-    missing_list = "\n".join(f"- {p}" for p in missing)
-    raise FileNotFoundError(
-        "检测到 --skip-prepare，但缺少预处理产物。\n"
-        f"数据集: {dataset_name}\n"
-        f"缺失文件:\n{missing_list}\n"
-        "请去掉 --skip-prepare 重新运行（prepare 阶段会从 Hugging Face 拉取并写出这些文件）；"
-        "若必须离线运行，请先手动准备上述文件。"
-    )
-
-
 def _load_hf_split(dataset_name: str, split_name: str) -> Optional[Dataset]:
     try:
         spec = HF_DATASET_IDS.get(dataset_name)
         if not spec:
             return None
-        repo, config_name = spec
+        repo, config_name, revision, data_dir = spec
+        kw: Dict[str, Any] = {}
+        if revision:
+            kw["revision"] = revision
+        if data_dir:
+            kw["data_dir"] = data_dir
         if config_name:
-            ds = load_dataset(repo, config_name, split=split_name)
+            ds = load_dataset(repo, config_name, split=split_name, **kw)
         else:
-            ds = load_dataset(repo, split=split_name)
+            ds = load_dataset(repo, split=split_name, **kw)
         return ds
     except Exception as exc:
         LOGGER.warning("加载数据集 %s split=%s 失败：%s", dataset_name, split_name, exc)
@@ -724,15 +731,27 @@ def reextract_hidden_states_from_trajectories(
     return len(rows)
 
 
-def _retrieve_step_docs(question: str, current_answer: str, docs_pool: List[str], used: List[int]) -> Tuple[str, float, int]:
+def _retrieve_step_docs(
+    cfg: Stage1Config,
+    dense_rerank: Optional[ContrieverBgeRetriever],
+    query: str,
+    docs_pool: List[str],
+    used: List[int],
+) -> Tuple[str, float, int]:
     if not docs_pool:
         return "", 0.0, -1
-    query = question if not current_answer else f"{question} {current_answer}"
-    retriever = BM25Retriever(docs_pool)
-    docs, scores, idxs = retriever.retrieve(query, k=1, exclude_indices=used)
-    if not docs:
-        return "", 0.0, -1
-    return docs[0], float(scores[0]), int(idxs[0])
+    backend = (cfg.retriever_backend or "bm25").strip().lower()
+    if backend == "bm25":
+        retriever = BM25Retriever(docs_pool)
+        docs, scores, idxs = retriever.retrieve(query, k=1, exclude_indices=used)
+        if not docs:
+            return "", 0.0, -1
+        return docs[0], float(scores[0]), int(idxs[0])
+    if backend == "contriever_bge":
+        if dense_rerank is None:
+            raise ValueError("retriever_backend=contriever_bge 但未提供 ContrieverBgeRetriever 实例")
+        return dense_rerank.retrieve_top1(query, used)
+    raise ValueError(f"未知 retriever_backend={cfg.retriever_backend!r}，可选: bm25, contriever_bge")
 
 
 def collect_trajectories(
@@ -741,40 +760,100 @@ def collect_trajectories(
     split: str,
     hidden_state_extractor: HiddenStateExtractor,
     nli_scorer: NLICrossEncoderScorer,
+    dense_rerank: Optional[ContrieverBgeRetriever] = None,
 ) -> int:
     in_path = cfg.data_processed_dir / dataset_name / f"{split}.jsonl"
     if not in_path.exists():
         raise FileNotFoundError(f"缺少处理后数据：{in_path}")
     rows = _read_jsonl(in_path)
-    llm_cfg = type("TmpCfg", (), {})()
-    llm_cfg.api_base = os.getenv("OPENAI_API_BASE", DEFAULT_LLM_API_BASE)
-    llm_cfg.api_key = os.getenv("OPENAI_API_KEY", "EMPTY")
-    llm_cfg.model_name = os.getenv("LLM_MODEL", DEFAULT_LLM_MODEL)
-    llm_cfg.max_tokens = 150
-    llm_cfg.temperature = float(cfg.temperature)
-    llm = LLMClient(llm_cfg)
+
+    llm_cfg_obj = type("TmpCfg", (), {})()
+    llm_cfg_obj.api_base = os.getenv("OPENAI_API_BASE", DEFAULT_LLM_API_BASE)
+    llm_cfg_obj.api_key = os.getenv("OPENAI_API_KEY", "EMPTY")
+    llm_cfg_obj.model_name = os.getenv("LLM_MODEL", DEFAULT_LLM_MODEL)
+    llm_cfg_obj.max_tokens = 150
+    llm_cfg_obj.temperature = float(cfg.temperature)
+    llm = LLMClient(llm_cfg_obj)
 
     out_path = cfg.trajectories_dir / dataset_name / split / "trajectories.jsonl"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     feature_dir = cfg.features_dir / dataset_name / split / "hidden_states"
     feature_dir.mkdir(parents=True, exist_ok=True)
-    for old_fp in feature_dir.glob("*.npz"):
-        old_fp.unlink()
+    # 仅在全量新跑（非续跑）时清空旧 .npz；续跑时保留已完成 item 的特征文件。
+    _is_fresh_run = not out_path.exists() or out_path.stat().st_size == 0
+    if _is_fresh_run:
+        for old_fp in feature_dir.glob("*.npz"):
+            old_fp.unlink()
 
-    produced = 0
-    with out_path.open("w", encoding="utf-8") as writer:
-        for row in tqdm(rows, desc=f"trajectory::{dataset_name}/{split}"):
+    skip_self_eval: bool = cfg.skip_self_eval or os.getenv(
+        "PANDORA_STAGE1_SKIP_SELF_EVAL", ""
+    ).lower() in ("1", "true", "yes")
+    backend = (cfg.retriever_backend or "bm25").strip().lower()
+    num_workers = max(1, int(cfg.num_workers))
+
+    if skip_self_eval:
+        LOGGER.info(
+            "trajectory::%s/%s skip_self_eval=True（self_eval_score 记为 0）",
+            dataset_name, split,
+        )
+    if num_workers > 1:
+        LOGGER.info(
+            "trajectory::%s/%s 并行模式 num_workers=%d",
+            dataset_name, split, num_workers,
+        )
+
+    # 每个本地 GPU 模型用独立锁串行调用，防止多线程并发的 CUDA stream 竞争。
+    # vLLM HTTP 调用无需锁（httpx 客户端线程安全）。
+    _hidden_lock = threading.Lock()
+    _retriever_lock = threading.Lock()
+    _nli_lock = threading.Lock()
+
+    def _process_item(
+        row: Dict[str, Any],
+    ) -> Optional[Tuple[Dict[str, Any], List[Tuple[Path, np.ndarray, np.ndarray]]]]:
+        """处理单条轨迹，返回 (traj_dict, [(feat_path, emb_last, emb_mean)])；失败返回 None。"""
+        try:
             q = row["question"]
             gold = row["answer"]
             docs_pool = row.get("documents", []) or [q]
+
+            # 预编码段落向量（无状态，每个 item 独立，加锁防止 CUDA 并发）
+            _enc_pool: Optional[List[str]] = None
+            _enc_emb = None
+            if backend == "contriever_bge":
+                if dense_rerank is None:
+                    raise ValueError("contriever_bge 检索需传入 dense_rerank")
+                with _retriever_lock:
+                    _enc_pool, _enc_emb = dense_rerank.encode_docs(docs_pool)
+
             used: List[int] = []
             acc_context = ""
             current_answer = ""
+            trace = ""
             hist_docs: List[str] = []
             steps: List[Dict[str, Any]] = []
+            npz_writes: List[Tuple[Path, np.ndarray, np.ndarray]] = []
 
             for k in range(1, cfg.max_k + 1):
-                doc, score, doc_idx = _retrieve_step_docs(q, current_answer, docs_pool, used)
+                query = llm.generate_follow_up_query(q, trace, backend)
+
+                # ── 检索 ──────────────────────────────────────────
+                if backend == "bm25":
+                    _bm25 = BM25Retriever(docs_pool)
+                    _docs, _scores, _idxs = _bm25.retrieve(query, k=1, exclude_indices=used)
+                    if not _docs:
+                        break
+                    doc, score, doc_idx = _docs[0], float(_scores[0]), int(_idxs[0])
+                elif backend == "contriever_bge":
+                    with _retriever_lock:
+                        doc, score, doc_idx = dense_rerank.retrieve_top1(
+                            query, used, _enc_pool, _enc_emb
+                        )
+                    if doc_idx < 0:
+                        break
+                else:
+                    raise ValueError(f"未知 retriever_backend={cfg.retriever_backend!r}")
+
                 acc_before_doc = acc_context
                 if doc_idx >= 0:
                     used.append(doc_idx)
@@ -782,9 +861,13 @@ def collect_trajectories(
                 if doc:
                     acc_context = (acc_context + "\n\n" + doc).strip()
 
-                samples, gen_meta = llm.generate_n(
-                    q, acc_context, cfg.n_samples, cfg.temperature
+                intermediate_answer = (
+                    _normalize_text(llm.generate_intermediate_answer(query, doc)) if doc else ""
                 )
+                trace = append_trace_step(trace, query, doc, intermediate_answer)
+
+                # ── LLM 生成（HTTP，无需锁）─────────────────────
+                samples, gen_meta = llm.generate_n(q, acc_context, cfg.n_samples, cfg.temperature)
                 current_answer = _normalize_text(samples[0]) if samples else ""
                 f1, em = compute_metrics(current_answer, gold)
 
@@ -793,20 +876,28 @@ def collect_trajectories(
                 hyp_piece = f"{q} {acc_before_doc}".strip()
                 if len(hyp_piece) > 512:
                     hyp_piece = hyp_piece[:512]
-                nli_entail, nli_contra = (
-                    nli_scorer.entail_contra(doc, hyp_piece) if doc else (0.0, 0.0)
-                )
+
+                with _nli_lock:
+                    nli_entail, nli_contra = (
+                        nli_scorer.entail_contra(doc, hyp_piece) if doc else (0.0, 0.0)
+                    )
 
                 tok = int(round(float(gen_meta.get("token_count", 0))))
                 lat_ms = float(gen_meta.get("latency_ms", 0.0))
                 answer_logprob = float(gen_meta.get("answer_logprob", 0.0) or 0.0)
-                self_eval_score = float(llm.self_evaluate_score(q, acc_context, current_answer))
+
+                if skip_self_eval:
+                    self_eval_score = 0.0
+                else:
+                    self_eval_score = float(llm.self_evaluate_score(q, acc_context, current_answer))
 
                 steps.append(
                     {
                         "step": k,
+                        "retrieval_query": query,
                         "retrieved_doc": doc,
                         "retrieval_score": round(score, 4),
+                        "intermediate_answer": intermediate_answer,
                         "current_answer": current_answer,
                         "f1": round(float(f1), 4),
                         "em": bool(em),
@@ -825,34 +916,85 @@ def collect_trajectories(
                     }
                 )
 
-                # 每一步分别提取并缓存 hidden states，避免整条轨迹共享“最后一步”特征。
-                embedding_last, embedding_mean = hidden_state_extractor.extract(
-                    q, acc_context, current_answer
-                )
+                # ── 提取 hidden states（GPU，加锁）────────────────
+                with _hidden_lock:
+                    embedding_last, embedding_mean = hidden_state_extractor.extract(
+                        q, acc_context, current_answer
+                    )
                 feat_path = feature_dir / f"{row['id']}_step{k}.npz"
-                np.savez_compressed(
-                    feat_path,
-                    last_token=embedding_last.astype(np.float16),
-                    mean_pool=embedding_mean.astype(np.float16),
-                )
+                npz_writes.append((feat_path, embedding_last, embedding_mean))
 
-            writer.write(
-                json.dumps(
-                    {
-                        "id": row["id"],
-                        "dataset": dataset_name,
-                        "split": split,
-                        "question": q,
-                        "gold_answer": gold,
-                        "gt_hop_count": int(row.get("gt_hop_count", -1)),
-                        "steps": steps,
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n"
+            traj = {
+                "id": row["id"],
+                "dataset": dataset_name,
+                "split": split,
+                "question": q,
+                "gold_answer": gold,
+                "gt_hop_count": int(row.get("gt_hop_count", -1)),
+                "steps": steps,
+            }
+            return traj, npz_writes
+
+        except Exception as exc:
+            LOGGER.error(
+                "轨迹处理失败 id=%s: %s", row.get("id", "?"), exc, exc_info=True
             )
-            writer.flush()
-            produced += 1
+            return None
+
+    def _write_result(
+        writer,
+        result: Optional[Tuple[Dict[str, Any], List[Tuple[Path, np.ndarray, np.ndarray]]]],
+    ) -> bool:
+        if result is None:
+            return False
+        traj, npz_writes = result
+        for fp, emb_last, emb_mean in npz_writes:
+            np.savez_compressed(
+                fp,
+                last_token=emb_last.astype(np.float16),
+                mean_pool=emb_mean.astype(np.float16),
+            )
+        writer.write(json.dumps(traj, ensure_ascii=False) + "\n")
+        writer.flush()
+        return True
+
+    desc = f"trajectory::{dataset_name}/{split}"
+    produced = 0
+
+    # 断点续跑：读取已有 JSONL 中的 id，跳过已完成的 rows
+    done_ids: set = set()
+    if out_path.exists():
+        for rec in _read_jsonl(out_path):
+            _rid = rec.get("id")
+            if _rid:
+                done_ids.add(_rid)
+    if done_ids:
+        LOGGER.info(
+            "trajectory::%s/%s 续跑模式：已完成 %d 条，跳过重复。",
+            dataset_name, split, len(done_ids),
+        )
+        produced = len(done_ids)
+
+    pending_rows = [r for r in rows if r.get("id") not in done_ids]
+    file_mode = "a" if done_ids else "w"
+
+    with out_path.open(file_mode, encoding="utf-8") as writer:
+        if not pending_rows:
+            LOGGER.info("trajectory::%s/%s 已全部完成，无需重跑。", dataset_name, split)
+        elif num_workers <= 1:
+            for row in tqdm(pending_rows, desc=desc):
+                if _write_result(writer, _process_item(row)):
+                    produced += 1
+        else:
+            with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                for result in tqdm(
+                    executor.map(_process_item, pending_rows),
+                    total=len(pending_rows),
+                    desc=desc,
+                ):
+                    if _write_result(writer, result):
+                        produced += 1
+
     return produced
 
 
@@ -968,6 +1110,10 @@ def compute_oracle_and_pareto(cfg: Stage1Config, dataset_name: str) -> Dict[str,
     rows.append(oracle_row)
 
     df = pd.DataFrame(rows)
+    table_csv = cfg.results_dir / f"stage1_oracle_table_{dataset_name}.csv"
+    table_csv.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(table_csv, index=False)
+
     use_cost_x = cfg.oracle_cost_metric != "fixed"
     x_key = "avg_cost" if use_cost_x else "avg_steps"
     fig, ax = plt.subplots(1, 1, figsize=(7.5, 5))
@@ -1235,15 +1381,25 @@ def run_dataset_stage1(
     collect_splits: Sequence[str],
     hidden_state_extractor: HiddenStateExtractor,
     nli_scorer: NLICrossEncoderScorer,
+    dense_rerank: Optional[ContrieverBgeRetriever] = None,
 ) -> Dict[str, Any]:
     if not skip_prepare:
         counts = prepare_data(cfg, dataset_name)
     else:
-        _validate_skip_prepare_inputs(cfg, dataset_name)
-        counts = {}
-        for split in ["train", "calib", "dev", "test"]:
-            p = cfg.data_processed_dir / dataset_name / f"{split}.jsonl"
-            counts[split] = len(_read_jsonl(p)) if p.exists() else 0
+        missing_prep = _missing_prepared_artifacts(cfg, dataset_name)
+        if missing_prep:
+            LOGGER.warning(
+                "--skip-prepare 已开启，但数据集 %s 仍缺 %d 个预处理文件，将自动执行 prepare_data（"
+                "仅从 HF 写入本数据集的 data/processed 与 manifest，不会重跑已存在完整产物的数据集）。",
+                dataset_name,
+                len(missing_prep),
+            )
+            counts = prepare_data(cfg, dataset_name)
+        else:
+            counts = {}
+            for split in ["train", "calib", "dev", "test"]:
+                p = cfg.data_processed_dir / dataset_name / f"{split}.jsonl"
+                counts[split] = len(_read_jsonl(p)) if p.exists() else 0
 
     cached_counts: Dict[str, int] = {}
     all_splits = ("train", "calib", "dev", "test")
@@ -1291,7 +1447,7 @@ def run_dataset_stage1(
         for split in all_splits:
             if split in collect_splits:
                 cached_counts[split] = collect_trajectories(
-                    cfg, dataset_name, split, hidden_state_extractor, nli_scorer
+                    cfg, dataset_name, split, hidden_state_extractor, nli_scorer, dense_rerank
                 )
             else:
                 traj_path = cfg.trajectories_dir / dataset_name / split / "trajectories.jsonl"
@@ -1374,8 +1530,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--calib-quota", type=int, default=1000)
     parser.add_argument("--dev-quota", type=int, default=1000)
     parser.add_argument("--test-quota", type=int, default=1000)
-    parser.add_argument("--temperature", type=float, default=0.7)
-    parser.add_argument("--n-samples", type=int, default=10)
+    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--n-samples", type=int, default=1)
     parser.add_argument("--cost-per-step", type=float, default=0.05)
     parser.add_argument(
         "--oracle-cost-metric",
@@ -1421,6 +1577,55 @@ def parse_args() -> argparse.Namespace:
         help="默认全量。逗号分隔，仅对这些 split 调用检索+LLM+写 trajectories 与每步 .npz；其余 split 必须已有 trajectories.jsonl（用于补跑缺条数的 split）",
     )
     parser.add_argument("--root-dir", type=str, default=".")
+    parser.add_argument(
+        "--retriever-backend",
+        type=str,
+        choices=("bm25", "contriever_bge"),
+        default=((os.getenv("PANDORA_RETRIEVER_BACKEND") or "bm25").strip().lower()),
+        help="迭代检索：bm25或 contriever_bge（Contriever-MS MARCO 短名单 + bge-reranker-v2-m3）",
+    )
+    parser.add_argument(
+        "--contriever-model",
+        type=str,
+        default=((os.getenv("PANDORA_CONTRIEVER_MODEL") or "facebook/contriever-msmarco").strip()),
+        help="Contriever 模型名或本地目录",
+    )
+    parser.add_argument(
+        "--reranker-model",
+        type=str,
+        default=((os.getenv("PANDORA_RERANKER_MODEL") or "BAAI/bge-reranker-v2-m3").strip()),
+        help="BGE cross-encoder 重排序模型名或本地目录",
+    )
+    parser.add_argument(
+        "--contriever-shortlist-k",
+        type=int,
+        default=int((os.getenv("PANDORA_CONTRIEVER_SHORTLIST_K") or "32").strip()),
+        help="Contriever 向量召回进入 cross-encoder 的短名单上限（候选更少时全进重排）",
+    )
+    parser.add_argument(
+        "--rerank-batch-size",
+        type=int,
+        default=int((os.getenv("PANDORA_RERANK_BATCH_SIZE") or "8").strip()),
+        help="重排序与 Contriever 编码的批大小",
+    )
+    parser.add_argument(
+        "--retriever-device",
+        type=str,
+        default=(os.getenv("RETRIEVER_DEVICE") or "").strip(),
+        help="检索模型设备，如 cuda / cuda:0 / cpu；默认自动检测",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=int((os.getenv("PANDORA_NUM_WORKERS") or "1").strip()),
+        help="并行轨迹收集的线程数（>1 时开启并行，LLM HTTP 并发，本地 GPU 模型加锁串行）",
+    )
+    parser.add_argument(
+        "--skip-self-eval",
+        action="store_true",
+        default=os.getenv("PANDORA_STAGE1_SKIP_SELF_EVAL", "").lower() in ("1", "true", "yes"),
+        help="跳过每步 self_evaluate_score HTTP 调用（节省 50%% LLM 请求，self_eval_score 记为 0）",
+    )
     return parser.parse_args()
 
 
@@ -1464,13 +1669,47 @@ def main() -> None:
         hidden_state_model=args.hidden_state_model,
         hidden_state_max_length=args.hidden_state_max_length,
         root_dir=Path(args.root_dir),
+        retriever_backend=str(args.retriever_backend),
+        contriever_model_id=str(args.contriever_model),
+        reranker_model_id=str(args.reranker_model),
+        contriever_shortlist_k=int(args.contriever_shortlist_k),
+        rerank_batch_size=int(args.rerank_batch_size),
+        retriever_device=(args.retriever_device or None),
+        num_workers=int(args.num_workers),
+        skip_self_eval=bool(args.skip_self_eval),
     )
     _ensure_dirs(cfg)
+    if args.skip_prepare:
+        for ds in datasets:
+            miss = _missing_prepared_artifacts(cfg, ds)
+            if miss:
+                LOGGER.info(
+                    "预处理：数据集 %s 在 --skip-prepare 下缺少 %d 个文件，进入该数据集时会自动 prepare。",
+                    ds,
+                    len(miss),
+                )
     hidden_state_extractor = HiddenStateExtractor(cfg)
     nli_device = (os.getenv("NLI_DEVICE") or "cpu").strip()
     local_nli = (cfg.root_dir / "models" / "cross-encoder-nli-deberta-v3-small").resolve()
     nli_model = str(local_nli) if local_nli.is_dir() and (local_nli / "config.json").exists() else None
     nli_scorer = NLICrossEncoderScorer(device=nli_device, model_id=nli_model)
+
+    dense_rerank: Optional[ContrieverBgeRetriever] = None
+    if (cfg.retriever_backend or "").strip().lower() == "contriever_bge":
+        rdev = (cfg.retriever_device or "").strip() or None
+        LOGGER.info(
+            "加载 Contriever+BGE 检索：contriever=%s reranker=%s device=%s",
+            cfg.contriever_model_id,
+            cfg.reranker_model_id,
+            rdev or "auto",
+        )
+        dense_rerank = ContrieverBgeRetriever(
+            contriever_model=cfg.contriever_model_id,
+            reranker_model=cfg.reranker_model_id,
+            device=rdev,
+            shortlist_k=cfg.contriever_shortlist_k,
+            rerank_batch_size=cfg.rerank_batch_size,
+        )
 
     all_metrics: Dict[str, Dict[str, Any]] = {}
     for ds in datasets:
@@ -1485,6 +1724,7 @@ def main() -> None:
             collect_splits=collect_splits,
             hidden_state_extractor=hidden_state_extractor,
             nli_scorer=nli_scorer,
+            dense_rerank=dense_rerank,
         )
 
     report_path = build_stage1_report(cfg, datasets, all_metrics)

@@ -33,6 +33,7 @@ from stage3.adapters.stage2_probe import (
     shallow_features_from_map,
     simulate_probe_baseline,
 )
+from stage3.cap_timing import evalue_cap_timing
 from stage3.config import Stage3Config
 from stage3.evalue import cumulative_error_rate_curve
 from stage3.quality_model import (
@@ -153,6 +154,100 @@ def _plot_wealth_trace(
     plt.close(fig)
 
 
+def _build_selective_prediction_metrics(
+    rows: List[Dict[str, Any]],
+    wealth_trace: List[float],
+    alpha: float,
+    gamma: float,
+) -> Dict[str, Any]:
+    """
+    基于 E-wealth cap 的逐样本拒答（Selective Prediction）：
+    - 处理第 i 个测试样本前，若 wealth_{i-1} ≥ cap=1/alpha（含数值裁剪容差），则该样本 abstain
+    - E-wealth 可升可降，因此拒答是**按时刻**门控，而非「首次触 cap 后永久拒答」
+    - Coverage = 回答样本数 / 总样本数
+    - Selective accuracy = 回答样本中 F1 >= gamma 的比例
+    """
+    n = int(len(rows))
+    if n <= 0:
+        return {
+            "cap": float(1.0 / float(alpha)),
+            "trigger_sample_index": None,
+            "answered": 0,
+            "abstained": 0,
+            "coverage": 0.0,
+            "selective_accuracy": 0.0,
+            "selective_avg_f1": 0.0,
+            "coverage_curve": [],
+            "accuracy_curve": [],
+        }
+
+    cap = float(1.0 / float(alpha))
+    # EWealthTracker 裁剪乘子后 wealth 可能略低于 cap（如 9.99999999），用相对容差判定“已触 cap”
+    cap_tol = max(1e-6 * cap, 1e-9)
+    trigger_idx: Optional[int] = None
+
+    coverage_curve: List[float] = []
+    accuracy_curve: List[float] = []
+
+    answered = 0
+    correct_answered = 0
+    f1_sum = 0.0
+
+    for i, row in enumerate(rows, start=1):
+        w_prev = float(wealth_trace[i - 1]) if i - 1 < len(wealth_trace) else 1.0
+        is_abstain = w_prev >= cap - cap_tol
+        if is_abstain and trigger_idx is None:
+            trigger_idx = int(i)
+        if not is_abstain:
+            answered += 1
+            f1 = float(row.get("f1", 0.0))
+            f1_sum += f1
+            if f1 >= float(gamma):
+                correct_answered += 1
+        cov = float(answered) / float(i)
+        acc = float(correct_answered) / float(answered) if answered > 0 else 0.0
+        coverage_curve.append(cov)
+        accuracy_curve.append(acc)
+
+    abstained = n - answered
+    selective_acc = float(correct_answered) / float(answered) if answered > 0 else 0.0
+    selective_avg_f1 = float(f1_sum) / float(answered) if answered > 0 else 0.0
+
+    return {
+        "cap": cap,
+        "trigger_sample_index": trigger_idx,
+        "answered": int(answered),
+        "abstained": int(abstained),
+        "coverage": float(answered) / float(n),
+        "selective_accuracy": selective_acc,
+        "selective_avg_f1": selective_avg_f1,
+        "coverage_curve": coverage_curve,
+        "accuracy_curve": accuracy_curve,
+    }
+
+
+def _plot_selective_tradeoff(
+    coverage_curve: List[float],
+    accuracy_curve: List[float],
+    title: str,
+    out_path: Path,
+) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(1, 1, figsize=(6.5, 5.0))
+    if coverage_curve and accuracy_curve:
+        ax.plot(coverage_curve, accuracy_curve, linewidth=1.6, color="#1f77b4")
+        ax.scatter([coverage_curve[-1]], [accuracy_curve[-1]], color="#d62728", s=28, zorder=3)
+    ax.set_xlim(0.0, 1.02)
+    ax.set_ylim(0.0, 1.02)
+    ax.set_xlabel("Coverage")
+    ax.set_ylabel("Selective Accuracy")
+    ax.set_title(title)
+    ax.grid(alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=160)
+    plt.close(fig)
+
+
 # ---------------------------------------------------------------------------
 # 单数据集单 gamma
 # ---------------------------------------------------------------------------
@@ -230,7 +325,12 @@ def _run_one_gamma(
 
     for alpha in s3.alphas:
         a = float(alpha)
-        qbar = tune_quality_bar_on_calib(phat_stop, err_stop, target_error=a)
+        qbar = tune_quality_bar_on_calib(
+            phat_stop,
+            err_stop,
+            target_error=a,
+            calib_method=s3.calib_method,
+        )
         cp_tau = conformal_min_phat_threshold(phat_stop, a)
 
         if s3.outcome_aware:
@@ -249,6 +349,31 @@ def _run_one_gamma(
                 probe_threshold=bundle.probe_threshold,
                 gamma=gamma, alpha=a, quality_bar=qbar,
             )
+
+        post_cap_interventions_block: Dict[str, Any] = {}
+        allowed_iv = {"abstain", "raise_budget", "fixed_k"}
+        if s3.outcome_aware and s3.post_cap_interventions:
+            for mode in s3.post_cap_interventions:
+                m = str(mode).strip().lower()
+                if not m or m not in allowed_iv:
+                    LOGGER.warning("跳过未知 post_cap_intervention: %s", mode)
+                    continue
+                ev_iv, w_iv = simulate_evalue_outcome_aware(
+                    ordered_test, test_probs, shallow_test_q, qmodel,
+                    cfg=cfg2,
+                    probe_threshold=bundle.probe_threshold,
+                    gamma=gamma, alpha=a, quality_bar=qbar,
+                    betting_strategy=s3.betting_strategy,
+                    betting_lambda=s3.betting_lambda,
+                    post_cap_intervention=m,  # type: ignore[arg-type]
+                    intervention_min_steps=int(s3.intervention_min_steps),
+                    intervention_fixed_k=int(s3.intervention_fixed_k),
+                )
+                post_cap_interventions_block[m] = {
+                    "summary": summarize(ev_iv, f"Probe+E-value+{m}"),
+                    "final_e_wealth": float(w_iv[-1]) if w_iv else 1.0,
+                    "wealth_trace": [float(x) for x in w_iv],
+                }
 
         cf_rows = simulate_conformal_phat_gate(
             ordered_test, test_probs, shallow_test_q, qmodel,
@@ -283,10 +408,22 @@ def _run_one_gamma(
             alpha=a,
         )
 
+        selective = _build_selective_prediction_metrics(
+            ev_rows, wealth_tr, alpha=a, gamma=gamma
+        )
+        png_selective = s3.results_dir / f"stage3_selective_ca_{dataset}_{tag}{shift_tag}.png"
+        _plot_selective_tradeoff(
+            selective["coverage_curve"],
+            selective["accuracy_curve"],
+            title=f"{dataset} selective prediction C-A (α={a}, γ={gamma}){shift_tag}",
+            out_path=png_selective,
+        )
+
         plot_paths[str(a)] = str(png_err)
 
         per_alpha[str(a)] = {
             "evalue_quality_bar": float(qbar),
+            "evalue_quality_bar_calib_method": str(s3.calib_method),
             "conformal_min_phat": float(cp_tau),
             "summaries": {
                 "probe": summarize(baseline_ordered, "Probe"),
@@ -295,8 +432,29 @@ def _run_one_gamma(
             },
             "final_e_wealth": float(wealth_tr[-1]) if wealth_tr else 1.0,
             "wealth_cap": float(1.0 / a),
+            "wealth_trace": [float(x) for x in wealth_tr],
+            "evalue_cap_timing": evalue_cap_timing(
+                [float(x) for x in wealth_tr],
+                cap=float(1.0 / a),
+                n_samples=len(ordered_test),
+                shift_type=str(s3.shift_type),
+                shift_fraction=float(s3.shift_fraction),
+            ),
+            "selective_prediction_abstain": {
+                "coverage": float(selective["coverage"]),
+                "answered": int(selective["answered"]),
+                "abstained": int(selective["abstained"]),
+                "selective_accuracy": float(selective["selective_accuracy"]),
+                "selective_avg_f1": float(selective["selective_avg_f1"]),
+                "trigger_sample_index": selective["trigger_sample_index"],
+                "cap": float(selective["cap"]),
+                "coverage_curve": [float(x) for x in selective["coverage_curve"]],
+                "accuracy_curve": [float(x) for x in selective["accuracy_curve"]],
+                "plot_ca_curve": str(png_selective),
+            },
             "plot_error_rate": str(png_err),
             "plot_wealth_trace": str(png_wealth),
+            "post_cap_interventions": post_cap_interventions_block,
         }
 
     return {
@@ -383,7 +541,13 @@ def run_dataset_stage3(
         "shift_type": s3.shift_type,
         "shift_fraction": s3.shift_fraction,
         "quality_use_probe_prob": s3.quality_use_probe_prob,
+        "calib_method": s3.calib_method,
         "shuffle_test_seed": int(s3.shuffle_test_seed),
+        "post_cap_intervention_config": {
+            "modes": list(s3.post_cap_interventions),
+            "intervention_min_steps": int(s3.intervention_min_steps),
+            "intervention_fixed_k": int(s3.intervention_fixed_k),
+        },
         "per_gamma": per_gamma,
     }
 
@@ -413,7 +577,11 @@ def _generate_markdown_report(
     bundle: Dict[str, Any],
 ) -> None:
     shift_tag = f"_{s3.shift_type}" if s3.shift_type != "none" else ""
-    report_path = s3.root_dir / "docs" / f"stage3_report_{dataset}{shift_tag}.md"
+    results_tag = ""
+    default_results_dir = (s3.root_dir / "results").resolve()
+    if s3.results_dir.resolve() != default_results_dir:
+        results_tag = f"_{s3.results_dir.name}"
+    report_path = s3.root_dir / "docs" / f"stage3_report_{dataset}{shift_tag}{results_tag}.md"
     report_path.parent.mkdir(parents=True, exist_ok=True)
 
     lines: List[str] = []
@@ -423,6 +591,7 @@ def _generate_markdown_report(
     lines.append(f"- Betting strategy: {bundle.get('betting_strategy', 'N/A')}")
     lines.append(f"- Outcome aware: {bundle.get('outcome_aware', True)}")
     lines.append(f"- Quality use probe prob: {bundle.get('quality_use_probe_prob', True)}")
+    lines.append(f"- Quality bar calib method: {bundle.get('calib_method', 'quantile')}")
     lines.append(f"- Shift type: {bundle.get('shift_type', 'none')}")
     lines.append("")
 
@@ -459,9 +628,32 @@ def _generate_markdown_report(
 
             final_w = a_data.get("final_e_wealth", 1.0)
             cap = a_data.get("wealth_cap", 10.0)
+            sel = a_data.get("selective_prediction_abstain", {})
+            coverage = float(sel.get("coverage", 1.0))
+            sacc = float(sel.get("selective_accuracy", 0.0))
+            abstained = int(sel.get("abstained", 0))
+            trig = sel.get("trigger_sample_index", None)
             lines.append(f"")
             lines.append(f"  E-wealth final={final_w:.4f}, cap=1/α={cap:.1f}")
+            lines.append(
+                f"  Selective Prediction (abstain if pre-sample wealth ≥ cap): "
+                f"coverage={coverage:.3f}, selective_acc={sacc:.3f}, "
+                f"abstained={abstained}, first_abstain_idx={trig}"
+            )
             lines.append("")
+            pci = a_data.get("post_cap_interventions") or {}
+            if pci:
+                lines.append("  Post-cap interventions (wealth ≥ cap before sample):")
+                for mode, blob in sorted(pci.items()):
+                    sm = blob.get("summary", {})
+                    lines.append(
+                        f"    - {mode}: F1={sm.get('avg_f1', 0.0):.4f}, "
+                        f"steps={sm.get('avg_steps', 0.0):.2f}, "
+                        f"coverage={sm.get('coverage', 1.0):.3f}, "
+                        f"abstain_n={sm.get('abstain_count', 0)}, "
+                        f"final_wealth={blob.get('final_e_wealth', 0.0):.4f}"
+                    )
+                lines.append("")
 
     with report_path.open("w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
@@ -511,6 +703,13 @@ def parse_args() -> argparse.Namespace:
                     action="store_false")
     p.add_argument("--quality-max-iter", type=int, default=300)
     p.add_argument("--quality-random-state", type=int, default=42)
+    p.add_argument(
+        "--calib-method",
+        type=str,
+        default="quantile",
+        choices=("quantile", "error_rate"),
+        help="quality_bar 校准方式：quantile(默认推荐) 或 error_rate(原版对照)",
+    )
 
     p.add_argument("--shift-type", type=str, default="none",
                     choices=("none", "sudden", "gradual", "periodic"),
@@ -519,6 +718,24 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--shuffle-test-seed", type=int, default=42)
     p.add_argument("--results-dir", type=str, default="results")
+    p.add_argument(
+        "--post-cap-interventions",
+        type=str,
+        default="abstain,raise_budget,fixed_k",
+        help="逗号分隔：abstain | raise_budget | fixed_k；空字符串关闭（仅 outcome-aware E-value）",
+    )
+    p.add_argument(
+        "--intervention-min-steps",
+        type=int,
+        default=0,
+        help="raise_budget：wealth≥cap 时强制至少走到该步；0 表示用 --max-k",
+    )
+    p.add_argument(
+        "--intervention-fixed-k",
+        type=int,
+        default=0,
+        help="fixed_k：wealth≥cap 时固定采用该步答案；0 表示用 --max-k",
+    )
     return p.parse_args()
 
 
@@ -534,6 +751,11 @@ def main() -> None:
     ) or (0.1, 0.2)
 
     root = Path(args.root_dir)
+    pc_iv = tuple(
+        x.strip().lower()
+        for x in str(args.post_cap_interventions).split(",")
+        if x.strip()
+    )
     s3 = Stage3Config(
         root_dir=root,
         max_k=int(args.max_k),
@@ -548,12 +770,16 @@ def main() -> None:
         betting_lambda=float(args.betting_lambda),
         outcome_aware=not args.no_outcome_aware,
         quality_use_probe_prob=bool(args.quality_use_probe_prob),
+        calib_method=str(args.calib_method),
         quality_max_iter=int(args.quality_max_iter),
         quality_random_state=int(args.quality_random_state),
         shift_type=args.shift_type,
         shift_fraction=float(args.shift_fraction),
         shuffle_test_seed=int(args.shuffle_test_seed),
         results_dir=root / str(args.results_dir),
+        post_cap_interventions=pc_iv,
+        intervention_min_steps=int(args.intervention_min_steps),
+        intervention_fixed_k=int(args.intervention_fixed_k),
     )
 
     datasets = [d.strip().lower() for d in args.datasets.split(",") if d.strip()]

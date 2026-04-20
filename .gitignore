@@ -95,15 +95,15 @@ dmypy.json
 # --- 实验跟踪（若使用） ---
 wandb/
 
-# --- External baseline repositories ---
+# --- External baseline repositories / snapshots ---
 baselines/Stop-RAG/
+baselines/stop-rag-pandora/
 
-# --- Stop-RAG snapshot: keep code and lightweight records only ---
-baselines/stop-rag-pandora/data/
-baselines/stop-rag-pandora/outputs/**/*.bin
-baselines/stop-rag-pandora/outputs/**/*.safetensors
-baselines/stop-rag-pandora/outputs/**/optimizer.pt
-baselines/stop-rag-pandora/outputs/**/scheduler.pt
-baselines/stop-rag-pandora/outputs/**/rng_state.pth
-baselines/stop-rag-pandora/results/**/*.jsonl
-!baselines/stop-rag-pandora/stop_rag_dataset_run.log
+# --- Project documents and final experiment results ---
+!*.md
+!*.tex
+!*.pdf
+!docs/
+!docs/**
+!results/
+!results/**

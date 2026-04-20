@@ -36,7 +36,7 @@
 
 **Primary objective.** 策略 $\pi$ 需要决定停止时刻 $\tau_\pi \in 0, 1, ..., K$，以最大化期望净收益：
 $$
-\pi^* = \arg\max_\pi \mathbb{E}_\pi \left[ Q(s_{\tau_\pi}) - \sum_{k=1}^{\tau_\pi} c_k \right]
+\pi^* = \arg\max_\pi \mathbb{E}*\pi \left[ Q(s*{\tau_\pi}) - \sum_{k=1}^{\tau_\pi} c_k \right]
 $$
 
 **Safety monitor.** 在部署流上，我们额外用 E-process 监控错误事件是否持续超出用户给定的风险水平 $\alpha$。其保证是：若真实错误率不超过 $\alpha$，则错误触发超阈值告警的概率受控，而不是“系统输出自动满足错误率 $\le \alpha$”。
@@ -61,7 +61,7 @@ $$
 
 由于实际中真实分布 $F_k$ 未知，我们提出用轻量级探针（Probe）基于 LLM 隐藏状态及可观测辅助特征来**逼近实例级继续价值或停止边际**（由 Stage 1 的 DP Oracle 写入 `test_oracle_labels.jsonl` 的 `step_targets[k]`：`expected_continue_val` $= V_{k+1}^i - c_{k+1}$，`margin` $= (V_{k+1}^i - c_{k+1}) - Q_k$）：
 $$
-\hat{y}_k = f_\theta(h_k, \phi_k) \approx V_{k+1}^i - c_{k+1}
+\hat{y}*k = f*\theta(h_k, \phi_k) \approx V_{k+1}^i - c_{k+1}
 \quad\text{或}\quad
 \widehat{\Delta}_k \approx \mathrm{margin}_k
 $$
@@ -106,9 +106,9 @@ E-value 的核心定位是**部署安全层 / 风险仪表盘**，而非“自�
 #### Phase 1: 数据收集与 Oracle 验证 (可行性验证)
 
 - **操作**：在训练集上，强制执行完整的 $K$ 步检索（设 $K=5$）。记录每一步的文档 $d_k$、答案质量 $Q(s_k)$ 以及对应的 LLM 隐藏状态 $h_k$。
-- **检索器**：Stage1 支持 `--retriever-backend bm25`（默认）或 **`contriever_bge`**（`facebook/contriever-msmarco` + `BAAI/bge-reranker-v2-m3`）。切换后端须清空 `cache/trajectories` 与 `cache/features` 后重跑；详见 `docs/experiments.md` **B1** 与根目录 `.env.example`。
+- **检索器**：Stage1 支持 `--retriever-backend bm25`（默认）或 `**contriever_bge`**（`facebook/contriever-msmarco` + `BAAI/bge-reranker-v2-m3`）。切换后端须清空 `cache/trajectories` 与 `cache/features` 后重跑；详见 `docs/experiments.md` **B1** 与根目录 `.env.example`。
 - **vLLM（Linux）**：若遇 `libstdc++.so.6` / `CXXABI_1.3.15` 或健康检查脚本里 `echo` 与状态码之间须有空格等注意事项，见 `docs/experiments.md` **B2**（`vLLM（Linux）与 libstdc++ / LD_LIBRARY_PATH`）及 `.env.example` 中对应注释。
-- **HF 缓存**：运行 Stage1 / 下载脚本时默认 **`HF_HOME=<仓库>/.hf_cache`**，避免沿用损坏的旧路径；覆盖方式见 `docs/STORAGE_LAYOUT.md`。
+- **HF 缓存**：运行 Stage1 / 下载脚本时默认 `**HF_HOME=<仓库>/.hf_cache`**，避免沿用损坏的旧路径；覆盖方式见 `docs/STORAGE_LAYOUT.md`。
 - **Oracle 计算（主线上界）**：对每条轨迹用已知 $Q(s_k)$ 与步级成本 $c_k$ 做**后向归纳 DP**，得到实例最优停止步与逐步标签 `step_targets`（含 $V_{k+1}-c_{k+1}$、`margin`、`action_label`），并写入 `artifacts/oracle/{dataset}/test_oracle_labels.jsonl`。CLI：`--oracle-cost-metric {fixed,token,latency}`；非 `fixed` 时 Stage1 Pareto 横轴为平均累计归一化成本。
 - **全局 Weitzman 基线**：仍在训练集上估计每步增益分布并解全局 $r_k^*$，在 Pareto 图中以 **Global-Weitzman** 点与 **Oracle（DP）** 对比，体现「静态阈值 vs 上下文 Oracle」的差距。
 - **实验**：以 DP Oracle 为天花板绘制 Stage1 Pareto；可选分析 Global-Weitzman 作为非 Oracle 的对照。
@@ -148,15 +148,15 @@ E-value 的核心定位是**部署安全层 / 风险仪表盘**，而非“自�
 
 ### 2. 动态停止的强 SOTA (Dynamic Stopping)
 
-- **Stop-RAG** *(NAACL 2024)*：基于 Q-learning 的动态停止 RAG。（**最直接的竞争对手**，但无错误率控制保障）。与主实验 **同 id、同切分** 的复现见 [`baselines/Stop-RAG/README.md`](baselines/Stop-RAG/README.md)（Pandora 对齐路径；勿使用上游 `download.sh` 子采样划分做 head-to-head）。
+- **Stop-RAG** *(NAACL 2024)*：基于 Q-learning 的动态停止 RAG。（**最直接的竞争对手**，但无错误率控制保障）。与主实验 **同 id、同切分** 的复现见 `[baselines/Stop-RAG/README.md](baselines/Stop-RAG/README.md)`（Pandora 对齐路径；勿使用上游 `download.sh` 子采样划分做 head-to-head）。
 - **ITER-RETGEN** *(EMNLP 2023)*：基于大模型自我评估的迭代生成。
 
 #### Stop-RAG 对比口径
 
-- Pandora 的主设定保持 Stage2 Phase C 的 **`F1 - λ·cost` + `GW(dev)` 步数上界约束**，不把纯 `max-F1` 阈值作为主结果。
-- 与 Stop-RAG 的公平 head-to-head 必须使用 **同切分、同样本 id**，且 Stop-RAG 只能采用 [`stop_rag_test.sh`](baselines/Stop-RAG/README.md) 的**在线早停**结果。
-- 主预算指标统一为 **`avg_steps`**；若写成成本，可等价记为 `cost = c * t`，其中 `t` 为在线检索轮数，但主文更建议直接报步数。
-- 主表应报 **`F1/EM @ matched avg_steps`** 或“达到同 F1 所需的 `avg_steps`”；主图应画两边 threshold sweep 的 **`F1 vs avg_steps` Pareto curve**。
+- Pandora 的主设定保持 Stage2 Phase C 的 `**F1 - λ·cost` + `GW(dev)` 步数上界约束**，不把纯 `max-F1` 阈值作为主结果。
+- 与 Stop-RAG 的公平 head-to-head 必须使用 **同切分、同样本 id**，且 Stop-RAG 只能采用 `[stop_rag_test.sh](baselines/Stop-RAG/README.md)` 的**在线早停**结果。
+- 主预算指标统一为 `**avg_steps`**；若写成成本，可等价记为 `cost = c * t`，其中 `t` 为在线检索轮数，但主文更建议直接报步数。
+- 主表应报 `**F1/EM @ matched avg_steps**` 或“达到同 F1 所需的 `avg_steps`”；主图应画两边 threshold sweep 的 `**F1 vs avg_steps` Pareto curve**。
 - `best-F1 vs best-F1` 只建议放 appendix，作为 quality-first 补充，不承载主 claim。
 
 ### 3. 风险控制与共形预测最新 SOTA (Risk-Control)

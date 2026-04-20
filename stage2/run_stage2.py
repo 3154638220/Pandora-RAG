@@ -5,13 +5,16 @@ Covers:
   A. Build Oracle step labels from Stage-1 cached trajectories
   B. Train Neural Probe（完整数据用双分支 `ProbeMLP_v2`，`--shallow-only` 用浅层 `ProbeMLP`）：
      默认使用 F1 回归（sigmoid + weighted Huber），可选回退为二分类 Focal BCE（Phase B）
-  C. Tune stop threshold on dev split（Phase C：GW(dev) 步数约束 + Pareto 分数 F1−λ·归一化成本）
+  C. Tune stop threshold on dev split（Phase C：GW(dev) 步数约束 + Pareto 分数 F1−λ·归一化成本；P1 支持保守逐步阈值 refinement）
   D. Evaluate on test and compare with baselines
 
 Usage:
   python -m stage2.run_stage2 --datasets hotpotqa,musique,2wiki --max-k 5
   python -m stage2.run_stage2 --per-dataset-optimal --datasets hotpotqa,musique,2wiki
   python -m stage2.run_stage2 --rethreshold-only --gw-steps-cap-mult 1.2 --artifact-suffix ablate_cap120
+  python -m stage2.run_stage2 --rethreshold-only --artifact-suffix pdopt_best
+  python -m stage2.run_stage2 --rethreshold-only --artifact-suffix pdopt_best --disable-step-threshold-refine
+  python -m stage2.run_stage2 --rethreshold-only --artifact-suffix ablate_cap120 --load-artifact-suffix pdopt_best
   python -m stage2.run_stage2 --train-margin-min-abs 0.05 --artifact-suffix ablate_margin_m05
   python -m stage2.run_stage2 --hidden-state-key mean_pool --artifact-suffix ablate_hidden_mean_pool
   python -m stage2.run_stage2 --hidden-state-key last_mean_blend --artifact-suffix ablate_hidden_last_mean_blend
@@ -25,7 +28,9 @@ Usage:
   python -m stage2.run_stage2 --per-dataset-optimal --sequence-gru --artifact-suffix pdopt_true_seq_gru
   python -m stage2.run_stage2 --per-dataset-optimal --probe-target f1 --seq-history-features --artifact-suffix pdopt_seqhist
   python -m stage2.run_stage2 --per-dataset-optimal --probe-target f1 --sequence-gru --artifact-suffix pdopt_seq_gru
-  （汇总报告写入 docs/stage2_report*.md；CSV/PNG 仍在 results/。rethreshold-only：加载已有 probe_mlp.pt，不重训。）
+  # Lite Probe（部署口径浅层：步数/检索分/廉价词面，无 NLI/熵/自洽/ROUGE 边际新颖度等）
+  python -m stage2.run_stage2 --per-dataset-optimal --probe-feature-mode lite --artifact-suffix probe_lite
+  （汇总报告写入 docs/stage2_report*.md；CSV/PNG 仍在 results/。rethreshold-only：加载已有 checkpoint，不重训。）
 """
 
 from __future__ import annotations
@@ -61,12 +66,32 @@ from pretest.utils.weitzman import (
 
 LOGGER = logging.getLogger(__name__)
 
-# 11 维基础（新增 answer_logprob/self_eval_score）+ 5 维步间差分 + cumulative_cost_ratio + Phase D4 答案/检索代理（3）
-BASE_SHALLOW_FEATURE_DIM = 20
+# 11 维基础 + 7 维步间/历史代理 + cumulative_cost_ratio + Phase D4(3) + P2 稳定性/重写/overlap(9)
+BASE_SHALLOW_FEATURE_DIM = 31
+# Lite：k_norm + retrieval_score + Δretrieval + cum_cost_ratio + log1p(token/latency)
+# + D4 中廉价二值/ streak（无 ROUGE 边际新颖度）+ P2 词面/重写（无 history_best_* 需额外打分器的 gap）
+LITE_SHALLOW_FEATURE_DIM = 15
 # 历史兼容名：不含序列聚合维（与 XGBoost 基线、旧 checkpoint 一致）
 SHALLOW_FEATURE_DIM = BASE_SHALLOW_FEATURE_DIM
 # 序列聚合（plan §二.3 建议 A）：teacher forcing 训练 / 自回归推理
 SEQ_AGG_FEATURE_DIM = 3
+LITE_SHALLOW_FEATURE_NAMES: Tuple[str, ...] = (
+    "k_norm",
+    "retrieval_score",
+    "delta_retrieval_score",
+    "cumulative_cost_ratio",
+    "log1p_token_count",
+    "log1p_latency_ms",
+    "answer_changed",
+    "answer_consistency_streak_norm",
+    "answer_change_rate",
+    "answer_flip_count_norm",
+    "query_rewrite_jaccard_prev",
+    "query_is_repeat",
+    "retrieved_doc_jaccard_prev",
+    "answer_doc_overlap",
+    "query_change_rate",
+)
 SHALLOW_FEATURE_NAMES: Tuple[str, ...] = (
     "k_norm",
     "retrieval_score",
@@ -79,6 +104,8 @@ SHALLOW_FEATURE_NAMES: Tuple[str, ...] = (
     "nli_contra",
     "log1p_token_count",
     "log1p_latency_ms",
+    "delta_answer_logprob",
+    "delta_self_eval_score",
     "delta_retrieval_score",
     "delta_semantic_entropy",
     "delta_self_consistency",
@@ -88,16 +115,28 @@ SHALLOW_FEATURE_NAMES: Tuple[str, ...] = (
     "answer_changed",
     "answer_consistency_streak_norm",
     "retrieval_marginal_novelty",
+    "answer_change_rate",
+    "answer_flip_count_norm",
+    "query_rewrite_jaccard_prev",
+    "query_is_repeat",
+    "retrieved_doc_jaccard_prev",
+    "answer_doc_overlap",
+    "history_best_self_eval_gap",
+    "history_best_logprob_gap",
+    "query_change_rate",
 )
+
+ThresholdSpec = Union[float, Dict[int, float]]
 
 
 def effective_shallow_dim(cfg: Stage2Config) -> int:
     """GRU 序列探针不扩维；否则可选拼接 SEQ_AGG（oracle teacher / 推理用自回归 pred）。"""
+    base = LITE_SHALLOW_FEATURE_DIM if cfg.probe_feature_mode == "lite" else BASE_SHALLOW_FEATURE_DIM
     if bool(cfg.sequence_gru):
-        return BASE_SHALLOW_FEATURE_DIM
+        return base
     if bool(cfg.seq_history_features):
-        return BASE_SHALLOW_FEATURE_DIM + SEQ_AGG_FEATURE_DIM
-    return BASE_SHALLOW_FEATURE_DIM
+        return base + SEQ_AGG_FEATURE_DIM
+    return base
 
 
 # D4：ROUGE-L 用截断词序列，避免超长 retrieved_doc 导致 LCS 过慢
@@ -130,6 +169,8 @@ class Stage2Config:
     oracle_cost_metric: str = "fixed"
     root_dir: Path = Path(".")
     hidden_state_key: str = "last_token"
+    # full：31 维浅层（与历史一致）；lite：15 维部署口径（无 NLI/熵/自洽/ROUGE 边际新颖度等昂贵特征）
+    probe_feature_mode: Literal["full", "lite"] = "full"
     # Hidden 分支：在 LayerNorm→Linear→GELU 后加 z+Linear(z) 残差（plan：Residual Compression）。
     hidden_branch_residual: bool = False
     # C1：Shallow-Only — 不使用 Stage1 的 hidden states，仅浅层特征（含 Delta）训练 Probe（w/o Deep Features）。
@@ -162,9 +203,18 @@ class Stage2Config:
     # Phase C：阈值在 dev 上联合「Pareto 分数 F1−λ·归一化成本」与 GW 步数上界（avg_steps ≤ GW_dev×mult）
     threshold_pareto_lambdas: Tuple[float, ...] = (0.1, 0.3, 0.5, 1.0)
     threshold_gw_steps_cap_mult: float = 1.05
+    # P1：在通过 GW cap 的前提下，允许对逐步阈值做保守 refinement；
+    # 仅当它真正改进 cost-aware utility / matched-budget F1 / Pareto 前沿时才接管主策略。
+    enable_step_threshold_refine: bool = True
+    step_threshold_refine_passes: int = 3
     # 结果文件名后缀（如 D3 消融 `--artifact-suffix d3_bce`，避免覆盖默认 `stage2_probe_table_*.csv`）
     artifact_suffix: str = ""
-    # 仅重跑 Phase C 阈值 + test 评估：从 checkpoint 加载权重（不重新训练）；checkpoint 路径用 shallow 与「空 artifact_suffix」决定。
+    # rethreshold-only 时 checkpoint 加载后缀：
+    # 1) 若 load_artifact_suffix 非空，优先用它；
+    # 2) 否则回退到 artifact_suffix；
+    # 3) 再回退到默认空后缀（历史 probe_mlp*.pt）。
+    load_artifact_suffix: str = ""
+    # 仅重跑 Phase C 阈值 + test 评估：从 checkpoint 加载权重（不重新训练）。
     rethreshold_only: bool = False
     # Probe 训练目标：binary=Continue/Stop 二分类；f1=回归当前步 F1（0~1）。
     probe_target: Literal["binary", "f1"] = "binary"
@@ -382,8 +432,11 @@ def _stage2_artifact_tag(cfg: Stage2Config) -> str:
 
 
 def _checkpoint_tag_for_load(cfg: Stage2Config) -> str:
-    """与已保存权重文件名一致：仅 shallow_only 参与，不含输出用 artifact_suffix。"""
-    return _stage2_artifact_tag(replace(cfg, artifact_suffix=""))
+    """rethreshold-only 的 checkpoint 选择：load_artifact_suffix > artifact_suffix > 空后缀。"""
+    load_suffix = (cfg.load_artifact_suffix or "").strip()
+    if not load_suffix:
+        load_suffix = (cfg.artifact_suffix or "").strip()
+    return _stage2_artifact_tag(replace(cfg, artifact_suffix=load_suffix))
 
 
 def _load_probe_from_checkpoint(
@@ -407,12 +460,23 @@ def _load_probe_from_checkpoint(
     scaler.n_features_in_ = int(scaler.mean_.shape[0])
     scaler.n_samples_seen_ = np.array([1], dtype=np.int64)
 
+    state_dict = cast(Dict[str, torch.Tensor], ckpt["model_state_dict"])
     stage1_hd = int(ckpt.get("stage1_hidden_dim", 0))
     shallow_d = int(ckpt.get("shallow_feature_dim") or SHALLOW_FEATURE_DIM)
     if arch == "mlp_v2":
-        compress_d = int(ckpt.get("compress_dim") or cfg.compress_dim)
-        fuse_d = int(ckpt.get("fuse_dim") or cfg.fuse_dim)
-        hid_res = bool(ckpt.get("hidden_branch_residual", False))
+        compress_d = int(
+            state_dict["lin_h.weight"].shape[0]
+            if "lin_h.weight" in state_dict
+            else (ckpt.get("compress_dim") or cfg.compress_dim)
+        )
+        fuse_d = int(
+            state_dict["classifier.0.weight"].shape[0]
+            if "classifier.0.weight" in state_dict
+            else (ckpt.get("fuse_dim") or cfg.fuse_dim)
+        )
+        hid_res = bool(
+            ckpt.get("hidden_branch_residual", False) or "residual_h.weight" in state_dict
+        )
         model = ProbeMLP_v2(
             hidden_state_dim=stage1_hd,
             shallow_dim=shallow_d,
@@ -422,10 +486,24 @@ def _load_probe_from_checkpoint(
             hidden_branch_residual=hid_res,
         ).to(device)
     elif arch == "mlp_v2_gru":
-        compress_d = int(ckpt.get("compress_dim") or cfg.compress_dim)
-        fuse_d = int(ckpt.get("fuse_dim") or cfg.fuse_dim)
-        hid_res = bool(ckpt.get("hidden_branch_residual", False))
-        gru_h = int(ckpt.get("gru_hidden_dim") or cfg.gru_hidden_dim)
+        compress_d = int(
+            state_dict["lin_h.weight"].shape[0]
+            if "lin_h.weight" in state_dict
+            else (ckpt.get("compress_dim") or cfg.compress_dim)
+        )
+        fuse_d = int(
+            state_dict["shallow_branch.0.weight"].shape[0] // 2
+            if "shallow_branch.0.weight" in state_dict
+            else (ckpt.get("fuse_dim") or cfg.fuse_dim)
+        )
+        hid_res = bool(
+            ckpt.get("hidden_branch_residual", False) or "residual_h.weight" in state_dict
+        )
+        gru_h = int(
+            state_dict["head.weight"].shape[1]
+            if "head.weight" in state_dict
+            else (ckpt.get("gru_hidden_dim") or cfg.gru_hidden_dim)
+        )
         model = ProbeSequenceGRU(
             hidden_state_dim=stage1_hd,
             shallow_dim=shallow_d,
@@ -438,7 +516,7 @@ def _load_probe_from_checkpoint(
     else:
         mlp_h = int(ckpt.get("mlp_hidden_dim") or ckpt.get("hidden_dim") or cfg.hidden_dim)
         model = ProbeMLP(in_dim=shallow_d, hidden_dim=mlp_h, dropout=dropout).to(device)
-    model.load_state_dict(ckpt["model_state_dict"])
+    model.load_state_dict(state_dict)
     model.eval()
     return model, scaler, arch
 
@@ -553,9 +631,11 @@ def _load_hidden_map(
     return out
 
 
-def _delta_source_scalars(step: Dict[str, Any]) -> Tuple[float, float, float, float, float]:
-    """用于差分特征的 5 个标量：与 plan 中 delta_* 一一对应。"""
+def _delta_source_scalars(step: Dict[str, Any]) -> Tuple[float, float, float, float, float, float, float]:
+    """用于差分特征的 7 个标量：logprob / self-eval + 原有 5 个连续代理。"""
     return (
+        float(step.get("answer_logprob", 0.0) or 0.0),
+        float(step.get("self_eval_score", 0.0) or 0.0),
         float(step.get("retrieval_score", 0.0) or 0.0),
         float(step.get("semantic_entropy", 0.0) or 0.0),
         float(step.get("self_consistency", 0.0) or 0.0),
@@ -596,6 +676,30 @@ def _tokenize_words_truncated(text: str, max_tokens: int) -> List[str]:
     if len(toks) > max_tokens:
         return toks[:max_tokens]
     return toks
+
+
+def _token_set_truncated(text: Any, max_tokens: int = _D4_ROUGE_MAX_TOKENS) -> set[str]:
+    if text is None:
+        return set()
+    return set(_tokenize_words_truncated(str(text), max_tokens))
+
+
+def _jaccard_similarity(a: set[str], b: set[str]) -> float:
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    inter = len(a & b)
+    union = len(a | b)
+    if union <= 0:
+        return 0.0
+    return float(inter / union)
+
+
+def _overlap_ratio(a: set[str], b: set[str]) -> float:
+    if not a:
+        return 0.0
+    return float(len(a & b) / max(1, len(a)))
 
 
 def _rouge_l_f1(ref_tokens: List[str], cand_tokens: List[str]) -> float:
@@ -669,12 +773,128 @@ def _d4_answer_retrieval_features(
     return changed, streak_norm, marginal
 
 
+def _p2_history_stability_features(
+    steps_by_k: Dict[int, Dict[str, Any]],
+    k: int,
+    max_k: int,
+) -> Tuple[float, float, float, float, float, float, float, float, float]:
+    """P2：只依赖现有轨迹缓存的稳定性/重写/overlap/history-best 代理。"""
+    step_k = steps_by_k.get(k) or {}
+    ans_k = _canonical_answer_text(step_k.get("current_answer", ""))
+    q_k = str(step_k.get("retrieval_query", "") or "").strip().lower()
+    doc_k = str(step_k.get("retrieved_doc", "") or "").strip()
+
+    prev_answers = [
+        _canonical_answer_text((steps_by_k.get(j) or {}).get("current_answer", ""))
+        for j in range(1, k)
+        if steps_by_k.get(j) is not None
+    ]
+    flips = 0
+    if prev_answers:
+        chain = prev_answers + [ans_k]
+        for prev_ans, cur_ans in zip(chain[:-1], chain[1:]):
+            if cur_ans != prev_ans:
+                flips += 1
+    ans_change_rate = float(flips / max(1, k - 1)) if k > 1 else 0.0
+    ans_flip_count_norm = float(flips / max(1, max_k - 1))
+
+    prev_q = str((steps_by_k.get(k - 1) or {}).get("retrieval_query", "") or "").strip().lower()
+    q_tokens = _token_set_truncated(q_k)
+    prev_q_tokens = _token_set_truncated(prev_q)
+    query_rewrite_jaccard_prev = _jaccard_similarity(q_tokens, prev_q_tokens) if k > 1 else 0.0
+
+    prior_queries = [
+        str((steps_by_k.get(j) or {}).get("retrieval_query", "") or "").strip().lower()
+        for j in range(1, k)
+        if steps_by_k.get(j) is not None
+    ]
+    query_is_repeat = 1.0 if q_k and q_k in prior_queries else 0.0
+    unique_queries = len({q for q in prior_queries + ([q_k] if q_k else []) if q})
+    query_change_rate = (
+        float((unique_queries - 1) / max(1, k - 1)) if k > 1 and unique_queries > 0 else 0.0
+    )
+
+    prev_doc = str((steps_by_k.get(k - 1) or {}).get("retrieved_doc", "") or "").strip()
+    doc_tokens = _token_set_truncated(doc_k)
+    prev_doc_tokens = _token_set_truncated(prev_doc)
+    retrieved_doc_jaccard_prev = _jaccard_similarity(doc_tokens, prev_doc_tokens) if k > 1 else 0.0
+
+    answer_doc_overlap = _overlap_ratio(_token_set_truncated(ans_k, 64), doc_tokens)
+
+    prev_self_eval = [
+        float((steps_by_k.get(j) or {}).get("self_eval_score", 0.0) or 0.0)
+        for j in range(1, k)
+        if steps_by_k.get(j) is not None
+    ]
+    cur_self_eval = float(step_k.get("self_eval_score", 0.0) or 0.0)
+    history_best_self_eval_gap = (
+        float(max(prev_self_eval) - cur_self_eval) if prev_self_eval else 0.0
+    )
+
+    prev_logprob = [
+        float((steps_by_k.get(j) or {}).get("answer_logprob", 0.0) or 0.0)
+        for j in range(1, k)
+        if steps_by_k.get(j) is not None
+    ]
+    cur_logprob = float(step_k.get("answer_logprob", 0.0) or 0.0)
+    history_best_logprob_gap = float(max(prev_logprob) - cur_logprob) if prev_logprob else 0.0
+
+    return (
+        ans_change_rate,
+        ans_flip_count_norm,
+        query_rewrite_jaccard_prev,
+        query_is_repeat,
+        retrieved_doc_jaccard_prev,
+        answer_doc_overlap,
+        history_best_self_eval_gap,
+        history_best_logprob_gap,
+        query_change_rate,
+    )
+
+
+def _lite_shallow_row_for_step(
+    traj: Dict[str, Any],
+    step: Dict[str, Any],
+    k: int,
+    cfg: Stage2Config,
+    steps_by_k: Dict[int, Dict[str, Any]],
+    max_total_cost: float,
+) -> np.ndarray:
+    """Lite 浅层：步归一化、检索分、廉价日志与词面特征；不含 NLI/熵/ROUGE 边际新颖度等。"""
+    prev = steps_by_k.get(k - 1) if k > 1 else None
+    prev_rs = float((prev or {}).get("retrieval_score", 0.0) or 0.0)
+    cur_rs = float(step.get("retrieval_score", 0.0) or 0.0)
+    delta_rs = 0.0 if k <= 1 or prev is None else float(cur_rs - prev_rs)
+    cum = trajectory_cumulative_cost(
+        traj, k, cfg.cost_per_step, cfg.max_k, cfg.oracle_cost_metric
+    )
+    ratio = float(cum / max_total_cost)
+    cost = step.get("cost") or {}
+    token_count = float(cost.get("token_count", 0) or 0.0)
+    latency_ms = float(cost.get("latency_ms", 0.0) or 0.0)
+    parts = [
+        float(k) / float(max(1, cfg.max_k)),
+        cur_rs,
+        delta_rs,
+        ratio,
+        math.log1p(max(0.0, token_count)),
+        math.log1p(max(0.0, latency_ms)),
+    ]
+    changed, streak_norm, _marginal = _d4_answer_retrieval_features(steps_by_k, k, cfg.max_k)
+    p2 = _p2_history_stability_features(steps_by_k, k, cfg.max_k)
+    p2_lite = (p2[0], p2[1], p2[2], p2[3], p2[4], p2[5], p2[8])
+    return np.asarray(
+        list(parts) + [float(changed), float(streak_norm)] + [float(x) for x in p2_lite],
+        dtype=np.float32,
+    )
+
+
 def _step_shallow_features(
     step: Dict[str, Any],
     k: int,
     cfg: Stage2Config,
     *,
-    prev_delta_scalars: Optional[Tuple[float, float, float, float, float]] = None,
+    prev_delta_scalars: Optional[Tuple[float, float, float, float, float, float, float]] = None,
     cumulative_cost_ratio: float = 0.0,
 ) -> List[float]:
     cost = step.get("cost") or {}
@@ -695,7 +915,7 @@ def _step_shallow_features(
     ]
     curr = _delta_source_scalars(step)
     if k <= 1 or prev_delta_scalars is None:
-        deltas = [0.0, 0.0, 0.0, 0.0, 0.0]
+        deltas = [0.0] * len(curr)
     else:
         deltas = [c - p for c, p in zip(curr, prev_delta_scalars)]
     return base + deltas + [float(cumulative_cost_ratio)]
@@ -716,6 +936,8 @@ def _shallow_row_for_step(
     steps_by_k: Dict[int, Dict[str, Any]],
     max_total_cost: float,
 ) -> np.ndarray:
+    if cfg.probe_feature_mode == "lite":
+        return _lite_shallow_row_for_step(traj, step, k, cfg, steps_by_k, max_total_cost)
     prev = steps_by_k.get(k - 1) if k > 1 else None
     prev_sc = _delta_source_scalars(prev) if prev is not None else None
     cum = trajectory_cumulative_cost(
@@ -730,7 +952,8 @@ def _shallow_row_for_step(
         cumulative_cost_ratio=ratio,
     )
     d4 = _d4_answer_retrieval_features(steps_by_k, k, cfg.max_k)
-    return np.asarray(list(vec) + list(d4), dtype=np.float32)
+    p2 = _p2_history_stability_features(steps_by_k, k, cfg.max_k)
+    return np.asarray(list(vec) + list(d4) + list(p2), dtype=np.float32)
 
 
 def _make_oracle_maps(
@@ -1106,7 +1329,7 @@ def _train_probe_gru(
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    sdim = BASE_SHALLOW_FEATURE_DIM
+    sdim = effective_shallow_dim(cfg)
     model = ProbeSequenceGRU(
         hidden_state_dim=hidden_dim,
         shallow_dim=sdim,
@@ -1586,10 +1809,15 @@ def _precompute_probe_probs_from_map(
     sdim = int(scaler.n_features_in_)
     keys = list(step_feature_map.keys())
     feats_arr = np.stack([step_feature_map[k] for k in keys], axis=0)
-    x_s = feats_arr[:, :sdim].astype(np.float32, copy=False)
-    x_h = feats_arr[:, sdim:].astype(np.float32, copy=False)
-    x_s_scaled = scaler.transform(x_s).astype(np.float32)
     dual = isinstance(model, ProbeMLP_v2)
+    if dual:
+        hidden_dim = int(model.ln_h.normalized_shape[0])
+        x_s = feats_arr[:, :sdim].astype(np.float32, copy=False)
+        x_h = feats_arr[:, -hidden_dim:].astype(np.float32, copy=False)
+    else:
+        x_s = feats_arr[:, :sdim].astype(np.float32, copy=False)
+        x_h = feats_arr[:, 0:0].astype(np.float32, copy=False)
+    x_s_scaled = scaler.transform(x_s).astype(np.float32)
     probs = _predict_probs(model, x_s_scaled, x_h, cfg.batch_size, device, dual)
     return {k: float(p) for k, p in zip(keys, probs)}
 
@@ -1764,7 +1992,7 @@ def _precompute_probe_probs(
 
 def _simulate_probe_policy_from_probs(
     trajectories: List[Dict[str, Any]],
-    threshold: float,
+    threshold: ThresholdSpec,
     cfg: Stage2Config,
     precomputed_probs: Dict[Tuple[str, int], float],
 ) -> List[Dict[str, Any]]:
@@ -1787,7 +2015,12 @@ def _simulate_probe_policy_from_probs(
             if p_continue is None:
                 continue
 
-            if p_continue < threshold:
+            threshold_k = (
+                float(threshold.get(k, 0.5))
+                if isinstance(threshold, dict)
+                else float(threshold)
+            )
+            if p_continue < threshold_k:
                 chosen = step
                 break
 
@@ -1815,7 +2048,7 @@ def _simulate_probe_policy(
     step_feature_map: Dict[Tuple[str, int], np.ndarray],
     model: nn.Module,
     scaler: StandardScaler,
-    threshold: float,
+    threshold: ThresholdSpec,
     cfg: Stage2Config,
     precomputed_probs: Optional[Dict[Tuple[str, int], float]] = None,
 ) -> List[Dict[str, Any]]:
@@ -2016,6 +2249,52 @@ def _pick_best_threshold(
                 best_t, best_row = t_l, row_l
                 chosen_lambda = float(lam)
 
+    utility_lambda = (
+        float(chosen_lambda)
+        if chosen_lambda is not None
+        else (float(cfg.threshold_pareto_lambdas[0]) if cfg.threshold_pareto_lambdas else 0.0)
+    )
+
+    sweep_rows: List[Dict[str, Any]] = []
+    for i, (t, row) in enumerate(per_t):
+        ncost = norm_cost(row)
+        sweep_rows.append(
+            {
+                "policy_name": f"global@{t:.2f}",
+                "policy_type": "global",
+                "threshold": float(t),
+                "avg_f1": float(row["avg_f1"]),
+                "avg_em": float(row["avg_em"]),
+                "avg_steps": float(row["avg_steps"]),
+                "avg_cost": float(row["avg_cost"]),
+                "normalized_cost": float(ncost),
+                "utility": float(float(row["avg_f1"]) - utility_lambda * ncost),
+                "utility_lambda": float(utility_lambda),
+                "is_feasible_under_gw_cap": bool(i in feasible_idx),
+                "steps_gap_to_gw_dev": (
+                    float(float(row["avg_steps"]) - gw_dev_steps) if not math.isnan(gw_dev_steps) else None
+                ),
+            }
+        )
+
+    matched_budget_candidates: List[Dict[str, Any]] = []
+    if not math.isnan(gw_dev_steps):
+        feasible_rows = [sweep_rows[i] for i in feasible_idx]
+        feasible_rows_sorted = sorted(
+            feasible_rows,
+            key=lambda r: (abs(float(r["avg_steps"]) - gw_dev_steps), -float(r["avg_f1"])),
+        )
+        for r in feasible_rows_sorted[:5]:
+            matched_budget_candidates.append(
+                {
+                    "threshold": float(r["threshold"]),
+                    "avg_f1": float(r["avg_f1"]),
+                    "avg_steps": float(r["avg_steps"]),
+                    "steps_gap_to_gw_dev": float(float(r["avg_steps"]) - gw_dev_steps),
+                    "utility": float(r["utility"]),
+                }
+            )
+
     diag: Dict[str, Any] = {
         "gw_dev_avg_steps": float(gw_dev_steps) if not math.isnan(gw_dev_steps) else None,
         "step_cap": float(step_cap) if not math.isnan(step_cap) else None,
@@ -2024,10 +2303,256 @@ def _pick_best_threshold(
         "feasible_threshold_count": len(feasible_idx),
         "lambda_grid_trace": lambda_trace,
         "chosen_lambda": chosen_lambda,
+        "matched_budget_candidates": matched_budget_candidates,
+        "threshold_sweep_rows": sweep_rows,
     }
     best_row = dict(best_row)
     best_row["strategy"] = f"Probe@{best_t:.2f}"
     return float(best_t), best_row, diag
+
+
+def _pick_max_f1_operating_point(
+    sweep_rows: Sequence[Dict[str, Any]],
+) -> Tuple[Optional[float], Optional[Dict[str, Any]]]:
+    """Appendix 补充：同一 checkpoint 下，dev 上按纯 F1 选全局阈值。"""
+    global_rows = [r for r in sweep_rows if str(r.get("policy_type", "global")) == "global"]
+    if not global_rows:
+        return None, None
+
+    best_row = dict(global_rows[0])
+    for row in global_rows[1:]:
+        row_f1 = float(row.get("avg_f1", 0.0))
+        best_f1 = float(best_row.get("avg_f1", 0.0))
+        if row_f1 > best_f1 + 1e-12:
+            best_row = dict(row)
+            continue
+        if math.isclose(row_f1, best_f1, rel_tol=1e-9, abs_tol=1e-9):
+            row_cost = float(row.get("avg_cost", 0.0))
+            best_cost = float(best_row.get("avg_cost", 0.0))
+            if row_cost < best_cost - 1e-12:
+                best_row = dict(row)
+
+    threshold = best_row.get("threshold")
+    if threshold is None:
+        return None, None
+    best_row["selection_rule"] = "dev_max_f1_global_threshold"
+    return float(threshold), best_row
+
+
+def _step_threshold_policy_to_list(policy: Dict[int, float], max_k: int) -> List[float]:
+    return [float(policy.get(k, 0.5)) for k in range(1, max_k + 1)]
+
+
+def _summarize_policy_candidate(
+    policy_name: str,
+    policy_type: str,
+    threshold_spec: ThresholdSpec,
+    row: Dict[str, Any],
+    utility_lambda: float,
+    cost_span: Dict[str, Any],
+    gw_dev_steps: Optional[float],
+    step_cap: Optional[float],
+) -> Dict[str, Any]:
+    cmin = float(cost_span.get("min", 0.0) or 0.0)
+    cmax = float(cost_span.get("max", 1.0) or 1.0)
+    cspan = cmax - cmin
+    if abs(cspan) < 1e-12:
+        cspan = 1.0
+    norm_cost = float((float(row["avg_cost"]) - cmin) / cspan)
+    steps_gap = None
+    if gw_dev_steps is not None:
+        steps_gap = float(row["avg_steps"]) - float(gw_dev_steps)
+    feasible = True
+    if step_cap is not None:
+        feasible = float(row["avg_steps"]) <= float(step_cap) + 1e-9
+    payload: Dict[str, Any] = {
+        "policy_name": policy_name,
+        "policy_type": policy_type,
+        "avg_f1": float(row["avg_f1"]),
+        "avg_em": float(row["avg_em"]),
+        "avg_steps": float(row["avg_steps"]),
+        "avg_cost": float(row["avg_cost"]),
+        "normalized_cost": norm_cost,
+        "utility": float(row["avg_f1"]) - float(utility_lambda) * norm_cost,
+        "utility_lambda": float(utility_lambda),
+        "is_feasible_under_gw_cap": bool(feasible),
+        "steps_gap_to_gw_dev": steps_gap,
+    }
+    if policy_type == "global":
+        payload["threshold"] = float(threshold_spec)
+    else:
+        payload["per_step_thresholds"] = _step_threshold_policy_to_list(
+            cast(Dict[int, float], threshold_spec), max_k=len(cast(Dict[int, float], threshold_spec))
+        )
+    return payload
+
+
+def _is_policy_nondominated(
+    candidate_row: Dict[str, Any],
+    baseline_rows: Sequence[Dict[str, Any]],
+) -> bool:
+    c_cost = float(candidate_row["avg_cost"])
+    c_f1 = float(candidate_row["avg_f1"])
+    for row in baseline_rows:
+        b_cost = float(row["avg_cost"])
+        b_f1 = float(row["avg_f1"])
+        if (
+            b_cost <= c_cost + 1e-12
+            and b_f1 >= c_f1 - 1e-12
+            and (b_cost < c_cost - 1e-12 or b_f1 > c_f1 + 1e-12)
+        ):
+            return False
+    return True
+
+
+def _pick_step_threshold_refinement(
+    dev_trajectories: List[Dict[str, Any]],
+    dev_probs: Dict[Tuple[str, int], float],
+    cfg: Stage2Config,
+    *,
+    base_threshold: float,
+    base_row: Dict[str, Any],
+    base_diag: Dict[str, Any],
+) -> Tuple[Optional[Dict[int, float]], Optional[Dict[str, Any]], Dict[str, Any]]:
+    if cfg.max_k <= 1:
+        return None
+
+    candidates = [round(x, 3) for x in np.linspace(0.01, 0.99, 50)]
+    gw_dev_steps = base_diag.get("gw_dev_avg_steps")
+    step_cap = base_diag.get("step_cap")
+    utility_lambda = float(
+        base_diag.get("chosen_lambda")
+        if base_diag.get("chosen_lambda") is not None
+        else (cfg.threshold_pareto_lambdas[0] if cfg.threshold_pareto_lambdas else 0.0)
+    )
+    cost_span = cast(Dict[str, Any], base_diag.get("normalized_cost_span", {}))
+    global_sweep_rows = cast(List[Dict[str, Any]], base_diag.get("threshold_sweep_rows", []))
+    feasible_global_rows = [r for r in global_sweep_rows if bool(r.get("is_feasible_under_gw_cap", False))]
+    if not feasible_global_rows:
+        feasible_global_rows = global_sweep_rows
+
+    cmin = float(cost_span.get("min", 0.0) or 0.0)
+    cmax = float(cost_span.get("max", 1.0) or 1.0)
+    cspan = cmax - cmin
+    if abs(cspan) < 1e-12:
+        cspan = 1.0
+
+    def norm_cost(cost: float) -> float:
+        return float((float(cost) - cmin) / cspan)
+
+    def score_row(row: Dict[str, Any]) -> float:
+        return float(row["avg_f1"]) - utility_lambda * norm_cost(float(row["avg_cost"]))
+
+    def better_row(row_a: Dict[str, Any], row_b: Dict[str, Any]) -> bool:
+        score_a = score_row(row_a)
+        score_b = score_row(row_b)
+        if score_a > score_b + 1e-12:
+            return True
+        if math.isclose(score_a, score_b, rel_tol=1e-9, abs_tol=1e-9):
+            if row_a["avg_f1"] > row_b["avg_f1"] + 1e-12:
+                return True
+            if math.isclose(row_a["avg_f1"], row_b["avg_f1"], rel_tol=1e-9, abs_tol=1e-9):
+                return row_a["avg_cost"] < row_b["avg_cost"] - 1e-12
+        return False
+
+    policy: Dict[int, float] = {k: float(base_threshold) for k in range(1, cfg.max_k + 1)}
+    current_rows = _simulate_probe_policy_from_probs(dev_trajectories, policy, cfg, dev_probs)
+    current_row = _summarize_results(current_rows, "Probe-step-threshold")
+    if step_cap is not None and float(current_row["avg_steps"]) > float(step_cap) + 1e-9:
+        current_row = dict(base_row)
+
+    improved = False
+    trace: List[Dict[str, Any]] = []
+    for pass_idx in range(max(1, int(cfg.step_threshold_refine_passes))):
+        changed = False
+        for k in range(1, cfg.max_k):
+            best_t = float(policy[k])
+            best_row = dict(current_row)
+            for cand_t in candidates:
+                if math.isclose(float(cand_t), float(policy[k]), rel_tol=1e-9, abs_tol=1e-9):
+                    continue
+                cand_policy = dict(policy)
+                cand_policy[k] = float(cand_t)
+                cand_rows = _simulate_probe_policy_from_probs(dev_trajectories, cand_policy, cfg, dev_probs)
+                cand_row = _summarize_results(cand_rows, "Probe-step-threshold")
+                if step_cap is not None and float(cand_row["avg_steps"]) > float(step_cap) + 1e-9:
+                    continue
+                if better_row(cand_row, best_row):
+                    best_t = float(cand_t)
+                    best_row = cand_row
+            if not math.isclose(float(policy[k]), best_t, rel_tol=1e-9, abs_tol=1e-9):
+                policy[k] = best_t
+                current_row = best_row
+                changed = True
+                improved = True
+        trace.append(
+            {
+                "pass_index": int(pass_idx + 1),
+                "avg_f1": float(current_row["avg_f1"]),
+                "avg_steps": float(current_row["avg_steps"]),
+                "avg_cost": float(current_row["avg_cost"]),
+                "utility": score_row(current_row),
+                "per_step_thresholds": _step_threshold_policy_to_list(policy, cfg.max_k),
+            }
+        )
+        if not changed:
+            break
+
+    if step_cap is not None and float(current_row["avg_steps"]) > float(step_cap) + 1e-9:
+        return None
+
+    base_score = score_row(base_row)
+    cand_score = score_row(current_row)
+    improves_utility = cand_score > base_score + 1e-12
+    improves_matched_budget_f1 = (
+        float(current_row["avg_f1"]) > float(base_row["avg_f1"]) + 1e-12
+        and float(current_row["avg_steps"]) <= float(base_row["avg_steps"]) + 1e-9
+    )
+    expands_frontier = _is_policy_nondominated(current_row, feasible_global_rows) and (
+        float(current_row["avg_f1"]) > float(base_row["avg_f1"]) + 1e-12
+        or float(current_row["avg_cost"]) < float(base_row["avg_cost"]) - 1e-12
+    )
+
+    should_adopt = bool(improves_utility or improves_matched_budget_f1 or expands_frontier)
+    diag = {
+        "enabled": True,
+        "searched": True,
+        "adopted": should_adopt,
+        "started_from_threshold": float(base_threshold),
+        "base_policy_summary": _summarize_policy_candidate(
+            "global_baseline",
+            "global",
+            float(base_threshold),
+            base_row,
+            utility_lambda,
+            cost_span,
+            float(gw_dev_steps) if gw_dev_steps is not None else None,
+            float(step_cap) if step_cap is not None else None,
+        ),
+        "candidate_policy_summary": _summarize_policy_candidate(
+            "step_refined_candidate",
+            "per_step",
+            policy,
+            current_row,
+            utility_lambda,
+            cost_span,
+            float(gw_dev_steps) if gw_dev_steps is not None else None,
+            float(step_cap) if step_cap is not None else None,
+        ),
+        "adoption_reasons": {
+            "improves_utility": bool(improves_utility),
+            "improves_matched_budget_f1": bool(improves_matched_budget_f1),
+            "expands_frontier": bool(expands_frontier),
+        },
+        "coordinate_descent_trace": trace,
+    }
+    if not should_adopt and not improved:
+        diag["searched"] = False
+    if should_adopt:
+        row = dict(current_row)
+        row["strategy"] = "Probe(step-threshold)"
+        return policy, row, diag
+    return None, None, diag
 
 
 def _pareto_nondominated_min_cost_max_f1(
@@ -2100,12 +2625,47 @@ def _plot_dataset_pareto(
 
 
 def run_dataset_stage2(cfg: Stage2Config, dataset: str) -> Dict[str, Any]:
+    # rethreshold-only：必须先与 checkpoint 对齐浅层口径与序列开关，再构建 _build_xyw / feature_map
+    rethreshold_ck_meta: Optional[Dict[str, Any]] = None
+    if cfg.rethreshold_only:
+        load_tag_pre = _checkpoint_tag_for_load(cfg)
+        ckpt_pre = cfg.artifacts_probe_dir / dataset / f"probe_mlp{load_tag_pre}.pt"
+        if ckpt_pre.is_file():
+            try:
+                rethreshold_ck_meta = torch.load(ckpt_pre, map_location="cpu", weights_only=False)
+            except TypeError:
+                rethreshold_ck_meta = torch.load(ckpt_pre, map_location="cpu")
+            ck_mode = str((rethreshold_ck_meta or {}).get("probe_feature_mode", "full"))
+            if ck_mode in ("full", "lite"):
+                cfg = replace(cfg, probe_feature_mode=cast(Literal["full", "lite"], ck_mode))
+            if bool((rethreshold_ck_meta or {}).get("sequence_gru", False)):
+                cfg = replace(cfg, sequence_gru=True, seq_history_features=False)
+            elif bool((rethreshold_ck_meta or {}).get("seq_history_features", False)):
+                cfg = replace(cfg, seq_history_features=True, sequence_gru=False)
+            LOGGER.info(
+                "%s rethreshold-only：预加载 checkpoint 对齐 probe_feature_mode=%s seq_hist=%s gru=%s",
+                dataset,
+                cfg.probe_feature_mode,
+                bool(cfg.seq_history_features),
+                bool(cfg.sequence_gru),
+            )
+        else:
+            LOGGER.warning(
+                "%s rethreshold-only：未找到 %s，浅层/序列配置沿用 CLI。",
+                dataset,
+                ckpt_pre,
+            )
+
     train_traj = _load_trajectories(cfg, dataset, "train")
     dev_traj = _load_trajectories(cfg, dataset, "dev")
     test_traj = _load_trajectories(cfg, dataset, "test")
 
     if cfg.shallow_only:
-        LOGGER.info("Shallow-Only 模式：不使用 hidden states，输入维度=%d。", SHALLOW_FEATURE_DIM)
+        LOGGER.info(
+            "Shallow-Only 模式：不使用 hidden states，浅层维度=%d（probe_feature_mode=%s）。",
+            effective_shallow_dim(cfg),
+            cfg.probe_feature_mode,
+        )
         hidden_dim = 0
         train_hidden: Dict[str, np.ndarray] = {}
         dev_hidden = {}
@@ -2159,10 +2719,14 @@ def run_dataset_stage2(cfg: Stage2Config, dataset: str) -> Dict[str, Any]:
             float(np.mean(y_dev)) if y_dev.size else 0.0,
             float(np.std(y_dev)) if y_dev.size else 0.0,
         )
-    if x_dev_s.shape[0] > 0 and x_dev_s.shape[1] == BASE_SHALLOW_FEATURE_DIM:
+    if (
+        x_dev_s.shape[0] > 0
+        and cfg.probe_feature_mode == "full"
+        and x_dev_s.shape[1] == BASE_SHALLOW_FEATURE_DIM
+    ):
         ext_std = x_dev_s[:, 9:].std(axis=0)
         LOGGER.info(
-            "%s dev 浅层扩展维 std（Delta×5 + cum_ratio + D4×3，StandardScaler 前）: %s",
+            "%s dev 浅层扩展维 std（Delta×7 + cum_ratio + D4×3 + P2 稳定性特征，StandardScaler 前）: %s",
             dataset,
             np.array2string(ext_std, precision=4, suppress_small=True),
         )
@@ -2172,10 +2736,13 @@ def run_dataset_stage2(cfg: Stage2Config, dataset: str) -> Dict[str, Any]:
     if cfg.rethreshold_only:
         load_tag = _checkpoint_tag_for_load(cfg)
         ckpt_path = cfg.artifacts_probe_dir / dataset / f"probe_mlp{load_tag}.pt"
-        try:
-            ck_meta = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-        except TypeError:
-            ck_meta = torch.load(ckpt_path, map_location="cpu")
+        if rethreshold_ck_meta is not None:
+            ck_meta = rethreshold_ck_meta
+        else:
+            try:
+                ck_meta = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+            except TypeError:
+                ck_meta = torch.load(ckpt_path, map_location="cpu")
         ckpt_seq_hist = bool(ck_meta.get("seq_history_features", False))
         ckpt_seq_gru = bool(ck_meta.get("sequence_gru", False))
         model, scaler, probe_arch = _load_probe_from_checkpoint(ckpt_path, cfg)
@@ -2270,16 +2837,67 @@ def run_dataset_stage2(cfg: Stage2Config, dataset: str) -> Dict[str, Any]:
     threshold, best_dev_row, threshold_diag = _pick_best_threshold(
         train_traj, dev_traj, dev_probs_nn, cfg
     )
+    deployed_threshold: ThresholdSpec = float(threshold)
+    deployed_policy_type = "global"
+    step_refine_diag: Dict[str, Any] = {
+        "enabled": bool(cfg.enable_step_threshold_refine),
+        "searched": False,
+        "adopted": False,
+    }
+    if cfg.enable_step_threshold_refine:
+        step_policy, step_row, step_diag = _pick_step_threshold_refinement(
+            dev_traj,
+            dev_probs_nn,
+            cfg,
+            base_threshold=threshold,
+            base_row=best_dev_row,
+            base_diag=threshold_diag,
+        )
+        step_refine_diag = step_diag
+        if step_policy is not None and step_row is not None:
+            deployed_threshold = step_policy
+            deployed_policy_type = "per_step"
+            best_dev_row = step_row
     LOGGER.info(
-        "%s Phase C 阈值：GW_dev_avg_steps=%s cap_mult=%.3f chosen_λ=%s threshold=%.3f dev_f1=%.4f dev_steps=%.3f",
+        "%s Phase C 阈值：GW_dev_avg_steps=%s cap_mult=%.3f chosen_λ=%s policy=%s threshold=%s dev_f1=%.4f dev_steps=%.3f",
         dataset,
         threshold_diag.get("gw_dev_avg_steps"),
         float(cfg.threshold_gw_steps_cap_mult),
         threshold_diag.get("chosen_lambda"),
-        threshold,
+        deployed_policy_type,
+        (
+            f"{threshold:.3f}"
+            if deployed_policy_type == "global"
+            else json.dumps(_step_threshold_policy_to_list(cast(Dict[int, float], deployed_threshold), cfg.max_k))
+        ),
         float(best_dev_row["avg_f1"]),
         float(best_dev_row["avg_steps"]),
     )
+
+    appendix_max_f1_threshold, appendix_max_f1_dev_row = _pick_max_f1_operating_point(
+        cast(List[Dict[str, Any]], threshold_diag.get("threshold_sweep_rows", []))
+    )
+    appendix_max_f1_test_row: Optional[Dict[str, Any]] = None
+    if appendix_max_f1_threshold is not None and appendix_max_f1_dev_row is not None:
+        appendix_test = _simulate_probe_policy(
+            test_traj,
+            test_step_feat_map,
+            model,
+            scaler,
+            float(appendix_max_f1_threshold),
+            cfg,
+            precomputed_probs=test_probs,
+        )
+        appendix_max_f1_test_row = _summarize_results(appendix_test, "Probe-Appendix-MaxF1")
+        LOGGER.info(
+            "%s Appendix max-F1：dev threshold=%.3f dev_f1=%.4f dev_steps=%.3f | test_f1=%.4f test_steps=%.3f",
+            dataset,
+            float(appendix_max_f1_threshold),
+            float(appendix_max_f1_dev_row["avg_f1"]),
+            float(appendix_max_f1_dev_row["avg_steps"]),
+            float(appendix_max_f1_test_row["avg_f1"]),
+            float(appendix_max_f1_test_row["avg_steps"]),
+        )
 
     rows: List[Dict[str, Any]] = []
 
@@ -2288,7 +2906,7 @@ def run_dataset_stage2(cfg: Stage2Config, dataset: str) -> Dict[str, Any]:
         test_step_feat_map,
         model,
         scaler,
-        threshold,
+        deployed_threshold,
         cfg,
         precomputed_probs=test_probs,
     )
@@ -2351,6 +2969,33 @@ def run_dataset_stage2(cfg: Stage2Config, dataset: str) -> Dict[str, Any]:
     table_path = cfg.results_dir / f"stage2_probe_table_{dataset}{tag}.csv"
     table_df.to_csv(table_path, index=False)
 
+    sweep_rows_for_export = list(threshold_diag.get("threshold_sweep_rows", []))
+    step_refine_candidate = cast(Dict[str, Any], step_refine_diag.get("candidate_policy_summary", {}))
+    if step_refine_candidate:
+        sweep_rows_for_export.append(step_refine_candidate)
+    sweep_df = pd.DataFrame(sweep_rows_for_export)
+    sweep_path = cfg.results_dir / f"stage2_threshold_sweep_{dataset}{tag}.csv"
+    if not sweep_df.empty:
+        desired_cols = [
+            "policy_name",
+            "policy_type",
+            "threshold",
+            "per_step_thresholds",
+            "avg_f1",
+            "avg_em",
+            "avg_steps",
+            "avg_cost",
+            "normalized_cost",
+            "utility",
+            "utility_lambda",
+            "is_feasible_under_gw_cap",
+            "steps_gap_to_gw_dev",
+        ]
+        existing_cols = [c for c in desired_cols if c in sweep_df.columns]
+        remaining_cols = [c for c in sweep_df.columns if c not in existing_cols]
+        sweep_df = sweep_df[existing_cols + remaining_cols]
+    sweep_df.to_csv(sweep_path, index=False)
+
     pareto_path = cfg.results_dir / f"stage2_probe_pareto_{dataset}{tag}.png"
     _plot_dataset_pareto(
         table_df, dataset, pareto_path, title_extra="Shallow-Only" if cfg.shallow_only else ""
@@ -2376,6 +3021,12 @@ def run_dataset_stage2(cfg: Stage2Config, dataset: str) -> Dict[str, Any]:
             "gru_hidden_dim": int(cfg.gru_hidden_dim) if probe_arch == "mlp_v2_gru" else None,
             "dropout": float(cfg.dropout),
             "threshold": float(threshold),
+            "threshold_policy_type": deployed_policy_type,
+            "per_step_thresholds": (
+                _step_threshold_policy_to_list(cast(Dict[int, float], deployed_threshold), cfg.max_k)
+                if deployed_policy_type == "per_step"
+                else None
+            ),
             "hidden_state_key": cfg.hidden_state_key,
             "hidden_branch_residual": bool(cfg.hidden_branch_residual),
             "scaler_mean": scaler.mean_.astype(np.float32),
@@ -2386,6 +3037,7 @@ def run_dataset_stage2(cfg: Stage2Config, dataset: str) -> Dict[str, Any]:
             "shallow_only": bool(cfg.shallow_only),
             "stage1_hidden_dim": int(hidden_dim),
             "probe_target": str(cfg.probe_target),
+            "probe_feature_mode": str(cfg.probe_feature_mode),
         },
         model_path,
     )
@@ -2396,13 +3048,27 @@ def run_dataset_stage2(cfg: Stage2Config, dataset: str) -> Dict[str, Any]:
         {
             "dataset": dataset,
             "seed": cfg.seed,
+            "probe_feature_mode": str(cfg.probe_feature_mode),
             "hidden_dim_from_stage1": hidden_dim,
             "train_stats": train_stats,
             "dev_stats": dev_stats,
             "train_info": train_info,
             "best_dev_threshold": threshold,
+            "best_dev_threshold_policy_type": deployed_policy_type,
+            "best_dev_per_step_thresholds": (
+                _step_threshold_policy_to_list(cast(Dict[int, float], deployed_threshold), cfg.max_k)
+                if deployed_policy_type == "per_step"
+                else None
+            ),
             "best_dev_row": best_dev_row,
             "threshold_selection_phase_c": threshold_diag,
+            "step_threshold_refine": step_refine_diag,
+            "appendix_max_f1_operating_point": {
+                "selection_rule": "dev_max_f1_global_threshold",
+                "dev_threshold": appendix_max_f1_threshold,
+                "dev_summary": appendix_max_f1_dev_row,
+                "test_summary": appendix_max_f1_test_row,
+            },
             "probe_summary": probe_row,
             "oracle_summary": oracle_summary,
             "best_fixed_f1": best_fixed,
@@ -2415,6 +3081,7 @@ def run_dataset_stage2(cfg: Stage2Config, dataset: str) -> Dict[str, Any]:
             "sequence_gru": bool(cfg.sequence_gru),
             "probe_target": str(cfg.probe_target),
             "table_path": str(table_path),
+            "threshold_sweep_path": str(sweep_path),
             "pareto_path": str(pareto_path),
             "model_path": str(model_path),
         },
@@ -2423,15 +3090,30 @@ def run_dataset_stage2(cfg: Stage2Config, dataset: str) -> Dict[str, Any]:
     return {
         "dataset": dataset,
         "table_path": str(table_path),
+        "threshold_sweep_path": str(sweep_path),
         "pareto_path": str(pareto_path),
         "model_path": str(model_path),
         "threshold": float(threshold),
+        "threshold_policy_type": deployed_policy_type,
+        "per_step_thresholds": (
+            _step_threshold_policy_to_list(cast(Dict[int, float], deployed_threshold), cfg.max_k)
+            if deployed_policy_type == "per_step"
+            else None
+        ),
         "probe_summary": probe_row,
         "oracle_summary": oracle_summary,
         "best_fixed_f1": best_fixed,
         "probe_gain_over_best_fixed": probe_gain,
         "oracle_gap_to_probe": oracle_gap,
         "train_info": train_info,
+        "threshold_diag": threshold_diag,
+        "step_threshold_refine": step_refine_diag,
+        "appendix_max_f1_operating_point": {
+            "selection_rule": "dev_max_f1_global_threshold",
+            "dev_threshold": appendix_max_f1_threshold,
+            "dev_summary": appendix_max_f1_dev_row,
+            "test_summary": appendix_max_f1_test_row,
+        },
     }
 
 
@@ -2457,10 +3139,28 @@ def build_stage2_report(
     for ds, info in results.items():
         p = info["probe_summary"]
         o = info["oracle_summary"]
+        policy_type = info.get("threshold_policy_type", "global")
+        policy_str = f"threshold={info['threshold']:.2f}"
+        if policy_type == "per_step":
+            policy_str = f"per_step_thresholds={info.get('per_step_thresholds')}"
         lines.append(
-            f"- `{ds}`: threshold={info['threshold']:.2f}, "
+            f"- `{ds}`: policy={policy_type}, {policy_str}, "
             f"probe_f1={p['avg_f1']:.4f}, probe_steps={p['avg_steps']:.3f}, "
             f"oracle_f1={o['avg_f1']:.4f}, oracle_gap={info['oracle_gap_to_probe']:.4f}"
+        )
+    lines.append("")
+    lines.append("## Phase C Diagnostics")
+    lines.append("")
+    for ds, info in results.items():
+        diag = cast(Dict[str, Any], info.get("threshold_diag", {}))
+        step_refine = cast(Dict[str, Any], info.get("step_threshold_refine", {}))
+        matched = cast(List[Dict[str, Any]], diag.get("matched_budget_candidates", []))
+        lines.append(
+            f"- `{ds}`: chosen_lambda={diag.get('chosen_lambda')}, "
+            f"gw_dev_avg_steps={diag.get('gw_dev_avg_steps')}, "
+            f"feasible_threshold_count={diag.get('feasible_threshold_count')}, "
+            f"matched_budget_candidates={len(matched)}, "
+            f"step_refine_adopted={step_refine.get('adopted', False)}"
         )
     lines.append("")
     lines.append("## Probe vs Best Fixed-K")
@@ -2471,11 +3171,28 @@ def build_stage2_report(
             f"probe_gain={info['probe_gain_over_best_fixed']:+.4f}"
         )
     lines.append("")
+    lines.append("## Appendix Max-F1 Operating Point")
+    lines.append("")
+    for ds, info in results.items():
+        appendix = cast(Dict[str, Any], info.get("appendix_max_f1_operating_point", {}))
+        dev_row = cast(Optional[Dict[str, Any]], appendix.get("dev_summary"))
+        test_row = cast(Optional[Dict[str, Any]], appendix.get("test_summary"))
+        threshold = appendix.get("dev_threshold")
+        if dev_row is None or test_row is None or threshold is None:
+            lines.append(f"- `{ds}`: unavailable")
+            continue
+        lines.append(
+            f"- `{ds}`: dev_max_f1_threshold={float(threshold):.2f}, "
+            f"dev_f1={float(dev_row['avg_f1']):.4f}, dev_steps={float(dev_row['avg_steps']):.3f}, "
+            f"test_f1={float(test_row['avg_f1']):.4f}, test_steps={float(test_row['avg_steps']):.3f}"
+        )
+    lines.append("")
     lines.append("## Artifacts")
     lines.append("")
     for ds, info in results.items():
         lines.append(
             f"- `{ds}`: table=`{_artifact_href_for_doc(out_path, info['table_path'], root)}`, "
+            f"sweep=`{_artifact_href_for_doc(out_path, info['threshold_sweep_path'], root)}`, "
             f"pareto=`{_artifact_href_for_doc(out_path, info['pareto_path'], root)}`, "
             f"model=`{_artifact_href_for_doc(out_path, info['model_path'], root)}`"
         )
@@ -2483,6 +3200,41 @@ def build_stage2_report(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
+    return out_path
+
+
+def build_stage2_appendix_max_f1_summary(
+    results: Dict[str, Dict[str, Any]],
+    out_path: Path,
+) -> Path:
+    rows: List[Dict[str, Any]] = []
+    for ds, info in results.items():
+        appendix = cast(Dict[str, Any], info.get("appendix_max_f1_operating_point", {}))
+        dev_row = cast(Optional[Dict[str, Any]], appendix.get("dev_summary"))
+        test_row = cast(Optional[Dict[str, Any]], appendix.get("test_summary"))
+        threshold = appendix.get("dev_threshold")
+        main_probe = cast(Dict[str, Any], info.get("probe_summary", {}))
+        if dev_row is None or test_row is None or threshold is None:
+            rows.append({"dataset": ds, "available": False})
+            continue
+        rows.append(
+            {
+                "dataset": ds,
+                "available": True,
+                "selection_rule": appendix.get("selection_rule", "dev_max_f1_global_threshold"),
+                "dev_threshold": float(threshold),
+                "dev_avg_f1": float(dev_row["avg_f1"]),
+                "dev_avg_steps": float(dev_row["avg_steps"]),
+                "test_avg_f1": float(test_row["avg_f1"]),
+                "test_avg_steps": float(test_row["avg_steps"]),
+                "main_probe_test_avg_f1": float(main_probe.get("avg_f1", 0.0)),
+                "main_probe_test_avg_steps": float(main_probe.get("avg_steps", 0.0)),
+                "delta_test_f1_vs_main": float(test_row["avg_f1"]) - float(main_probe.get("avg_f1", 0.0)),
+                "delta_test_steps_vs_main": float(test_row["avg_steps"]) - float(main_probe.get("avg_steps", 0.0)),
+            }
+        )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).to_csv(out_path, index=False)
     return out_path
 
 
@@ -2599,15 +3351,34 @@ def parse_args() -> argparse.Namespace:
         help="Phase C：F1−λ·归一化成本的 λ 网格（逗号分隔）。",
     )
     parser.add_argument(
+        "--disable-step-threshold-refine",
+        action="store_true",
+        help="关闭 P1 的逐步阈值 refinement；默认开启，但只有在 dev 上确实改进 cost-aware 目标时才接管。",
+    )
+    parser.add_argument(
+        "--step-threshold-refine-passes",
+        type=int,
+        default=3,
+        help="P1：逐步阈值坐标搜索的最大轮数。",
+    )
+    parser.add_argument(
         "--artifact-suffix",
         type=str,
         default="",
         help="写入 probe 表 / checkpoint / meta 时的文件名后缀（避免并行或多配置覆盖）。",
     )
     parser.add_argument(
+        "--load-artifact-suffix",
+        type=str,
+        default="",
+        help="仅在 --rethreshold-only 下生效：checkpoint 加载后缀。优先级："
+        "--load-artifact-suffix > --artifact-suffix > 空后缀（历史默认 probe_mlp*.pt）。",
+    )
+    parser.add_argument(
         "--rethreshold-only",
         action="store_true",
-        help="不训练：从 artifacts/probe/<ds>/probe_mlp.pt（或 shallow 时 probe_mlp_shallow.pt）加载权重，"
+        help="不训练：从 artifacts/probe/<ds>/probe_mlp{tag}.pt 加载权重（tag 由"
+        " --load-artifact-suffix / --artifact-suffix 决定；shallow 自动附加 _shallow），"
         "仅用当前 --gw-steps-cap-mult 等在 dev 上重选阈值并评估 test。输出文件名仍受 --artifact-suffix 影响。",
     )
     parser.add_argument("--root-dir", type=str, default=".")
@@ -2640,6 +3411,13 @@ def parse_args() -> argparse.Namespace:
         default=128,
         help="ProbeSequenceGRU 隐状态维度。",
     )
+    parser.add_argument(
+        "--probe-feature-mode",
+        type=str,
+        choices=("full", "lite"),
+        default="full",
+        help="浅层特征：full=31 维（历史默认）；lite=15 维部署口径（无 NLI/熵/自洽/ROUGE 边际新颖度等）。",
+    )
     return parser.parse_args()
 
 
@@ -2668,6 +3446,7 @@ def main() -> None:
         oracle_cost_metric=args.oracle_cost_metric,
         root_dir=Path(args.root_dir),
         hidden_state_key=args.hidden_state_key,
+        probe_feature_mode=cast(Literal["full", "lite"], str(args.probe_feature_mode)),
         hidden_branch_residual=bool(args.hidden_branch_residual),
         hidden_dim=args.hidden_dim,
         compress_dim=args.compress_dim,
@@ -2692,7 +3471,10 @@ def main() -> None:
         probe_target=str(args.probe_target or "binary"),
         threshold_gw_steps_cap_mult=float(args.gw_steps_cap_mult),
         threshold_pareto_lambdas=pareto_lambdas,
+        enable_step_threshold_refine=not bool(args.disable_step_threshold_refine),
+        step_threshold_refine_passes=int(args.step_threshold_refine_passes),
         artifact_suffix=str(args.artifact_suffix or ""),
+        load_artifact_suffix=str(args.load_artifact_suffix or ""),
         rethreshold_only=bool(args.rethreshold_only),
     )
 
@@ -2752,7 +3534,18 @@ def main() -> None:
         title_suffix=report_title,
         repo_root=cfg.root_dir.resolve(),
     )
-    LOGGER.info("Stage2 complete. Report: %s", report_path)
+    appendix_summary_name = (
+        f"stage2_appendix_maxf1_summary{tag}.csv" if tag else "stage2_appendix_maxf1_summary.csv"
+    )
+    appendix_summary_path = build_stage2_appendix_max_f1_summary(
+        all_results,
+        cfg.results_dir / appendix_summary_name,
+    )
+    LOGGER.info(
+        "Stage2 complete. Report: %s | Appendix max-F1 summary: %s",
+        report_path,
+        appendix_summary_path,
+    )
     for ds in datasets:
         info = all_results[ds]
         LOGGER.info(

@@ -10,6 +10,8 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 
+PostCapIntervention = Literal["none", "abstain", "raise_budget", "fixed_k"]
+
 import numpy as np
 from sklearn.pipeline import Pipeline
 
@@ -113,6 +115,89 @@ def probe_stop_shallow_and_phat(
 # E-value 门控 — 结果感知型（推荐）
 # ---------------------------------------------------------------------------
 
+def _pick_outcome_aware_stop(
+    traj: Dict[str, Any],
+    sample_id: str,
+    steps: List[Dict[str, Any]],
+    continue_probs: Dict[Tuple[str, int], float],
+    shallow_by_step: Dict[Tuple[str, int], np.ndarray],
+    quality_model: Pipeline,
+    *,
+    cfg: Any,
+    probe_threshold: float,
+    quality_bar: float,
+    tracker: EWealthTracker,
+    force_min_step: int = 0,
+    ignore_exceeded_cap: bool = False,
+) -> Dict[str, Any]:
+    """
+    在给定 E-wealth tracker 状态下选择停止步（与 simulate_evalue_outcome_aware 主循环一致）。
+
+    force_min_step:
+        >0 时，Probe 在步 k < force_min_step 处即使想停也会被强制继续（用于 cap 后「提高检索预算」）。
+    ignore_exceeded_cap:
+        True 时不因 exceeded_cap 而强制继续（仅用于 cap 后 raise_budget 干预；主实验须为 False）。
+    """
+    chosen = steps[-1]
+    stopped_early = False
+    best_step: Optional[Dict[str, Any]] = None
+    best_phat = -1.0
+    fms = max(0, int(force_min_step))
+
+    for step in steps:
+        k = int(step.get("step", 0))
+        if k >= cfg.max_k:
+            chosen = step
+            break
+
+        p_cont = continue_probs.get((sample_id, k))
+        if p_cont is None:
+            continue
+        if float(p_cont) >= float(probe_threshold):
+            continue
+
+        z = shallow_by_step.get((sample_id, k))
+        if z is None:
+            continue
+        phat = float(predict_success_prob(quality_model, z.reshape(1, -1))[0])
+        if phat > best_phat:
+            best_phat = phat
+            best_step = step
+
+        cap_gate = tracker.exceeded_cap and not ignore_exceeded_cap
+        should_gate = (phat < float(quality_bar)) or cap_gate
+        if fms > 0 and k < fms:
+            should_gate = True
+        if should_gate:
+            continue
+
+        chosen = step
+        stopped_early = True
+        break
+
+    if not stopped_early and best_step is not None:
+        chosen = best_step
+
+    return {"chosen": chosen, "stopped_early": stopped_early, "best_step": best_step}
+
+
+def _pick_fixed_k_step(
+    steps: List[Dict[str, Any]],
+    *,
+    k_fixed: int,
+    max_k: int,
+) -> Dict[str, Any]:
+    """cap 后保守策略：固定停在 k_fixed（不超过 max_k 与轨迹可用步）。"""
+    k_eff = max(1, min(int(k_fixed), int(max_k)))
+    by_k = {int(s.get("step", 0)): s for s in steps}
+    if k_eff in by_k:
+        return by_k[k_eff]
+    le = [s for s in steps if int(s.get("step", 0)) <= k_eff]
+    if le:
+        return max(le, key=lambda s: int(s.get("step", 0)))
+    return steps[-1]
+
+
 def simulate_evalue_outcome_aware(
     trajectories: Sequence[Dict[str, Any]],
     continue_probs: Dict[Tuple[str, int], float],
@@ -126,6 +211,9 @@ def simulate_evalue_outcome_aware(
     quality_bar: float,
     betting_strategy: BettingStrategy = "predictive",
     betting_lambda: float = 0.5,
+    post_cap_intervention: PostCapIntervention = "none",
+    intervention_min_steps: int = 0,
+    intervention_fixed_k: int = 0,
 ) -> Tuple[List[Dict[str, Any]], List[float]]:
     """
     结果感知型 E-value 门控：
@@ -136,9 +224,18 @@ def simulate_evalue_outcome_aware(
     4. 当 wealth 接近 1/α → 下一次停止前会更保守（wealth 越高说明累积错误越多）
 
     每个样本处理完（无论是否提前停止）都会更新 wealth。
+
+    post_cap_intervention（检测后干预，在进入样本前 wealth ≥ 1/α 时触发）：
+    - none: 与主实验一致
+    - abstain: 拒答该样本，不观测结果、不更新 E-wealth（部署上可理解为不输出答案）
+    - raise_budget: 强制至少检索 intervention_min_steps 步再允许 Probe 停止（默认应用方传入 cfg.max_k）
+    - fixed_k: 忽略 Probe 早停，直接采用固定步 intervention_fixed_k 上的答案（默认应用方传入 cfg.max_k）
     """
     tracker = EWealthTracker(alpha=float(alpha))
     rows: List[Dict[str, Any]] = []
+    cap_tol = max(1e-6 * tracker.cap, 1e-9)
+    min_k = int(intervention_min_steps) if int(intervention_min_steps) > 0 else int(cfg.max_k)
+    fix_k = int(intervention_fixed_k) if int(intervention_fixed_k) > 0 else int(cfg.max_k)
 
     for traj in trajectories:
         sample_id = str(traj.get("id", ""))
@@ -148,33 +245,51 @@ def simulate_evalue_outcome_aware(
             tracker.trace.append(tracker.wealth)
             continue
 
-        chosen = steps[-1]
-        stopped_early = False
+        w_prev = float(tracker.wealth)
+        at_cap = w_prev >= tracker.cap - cap_tol
+        use_intervention = post_cap_intervention != "none" and at_cap
 
-        for step in steps:
-            k = int(step.get("step", 0))
-            if k >= cfg.max_k:
-                chosen = step
-                break
+        if use_intervention and post_cap_intervention == "abstain":
+            row = _empty_outcome(cfg, gamma)
+            row["abstain"] = True
+            row["post_cap_intervention"] = "abstain"
+            rows.append(row)
+            tracker.trace.append(tracker.wealth)
+            continue
 
-            p_cont = continue_probs.get((sample_id, k))
-            if p_cont is None:
-                continue
-            if float(p_cont) >= float(probe_threshold):
-                continue
-
-            z = shallow_by_step.get((sample_id, k))
-            if z is None:
-                continue
-            phat = float(predict_success_prob(quality_model, z.reshape(1, -1))[0])
-
-            should_gate = (phat < float(quality_bar)) or tracker.exceeded_cap
-            if should_gate:
-                continue
-
-            chosen = step
-            stopped_early = True
-            break
+        if use_intervention and post_cap_intervention == "fixed_k":
+            chosen = _pick_fixed_k_step(steps, k_fixed=fix_k, max_k=int(cfg.max_k))
+        elif use_intervention and post_cap_intervention == "raise_budget":
+            pick = _pick_outcome_aware_stop(
+                traj,
+                sample_id,
+                steps,
+                continue_probs,
+                shallow_by_step,
+                quality_model,
+                cfg=cfg,
+                probe_threshold=probe_threshold,
+                quality_bar=quality_bar,
+                tracker=tracker,
+                force_min_step=min(min_k, int(cfg.max_k)),
+                ignore_exceeded_cap=True,
+            )
+            chosen = pick["chosen"]
+        else:
+            pick = _pick_outcome_aware_stop(
+                traj,
+                sample_id,
+                steps,
+                continue_probs,
+                shallow_by_step,
+                quality_model,
+                cfg=cfg,
+                probe_threshold=probe_threshold,
+                quality_bar=quality_bar,
+                tracker=tracker,
+                force_min_step=0,
+            )
+            chosen = pick["chosen"]
 
         f1 = float(chosen.get("f1", 0.0))
         error = int(f1 < float(gamma))
@@ -192,7 +307,10 @@ def simulate_evalue_outcome_aware(
         )
         tracker.apply_outcome(error, lam)
 
-        rows.append(_finalize_row(traj, chosen, cfg, gamma))
+        row = _finalize_row(traj, chosen, cfg, gamma)
+        if use_intervention and post_cap_intervention in ("raise_budget", "fixed_k"):
+            row["post_cap_intervention"] = str(post_cap_intervention)
+        rows.append(row)
 
     return rows, tracker.trace
 
@@ -431,11 +549,14 @@ def attach_error_labels(rows: Sequence[Dict[str, Any]], gamma: float) -> List[Di
 
 
 def summarize(rows: Sequence[Dict[str, Any]], strategy: str) -> Dict[str, Any]:
-    f1s = [float(r.get("f1", 0.0)) for r in rows]
-    ems = [int(r.get("em", 0)) for r in rows]
-    steps = [int(r.get("steps_used", 0)) for r in rows]
-    costs = [float(r.get("avg_cost", 0.0)) for r in rows]
-    errs = [int(r.get("error", 0)) for r in rows]
+    answered = [r for r in rows if not r.get("abstain")]
+    abstain_n = int(len(rows) - len(answered))
+    f1s = [float(r.get("f1", 0.0)) for r in answered]
+    ems = [int(r.get("em", 0)) for r in answered]
+    steps = [int(r.get("steps_used", 0)) for r in answered]
+    costs = [float(r.get("avg_cost", 0.0)) for r in answered]
+    errs = [int(r.get("error", 0)) for r in answered]
+    n = int(len(rows))
     return {
         "strategy": strategy,
         "avg_steps": float(np.mean(steps) if steps else 0.0),
@@ -443,5 +564,7 @@ def summarize(rows: Sequence[Dict[str, Any]], strategy: str) -> Dict[str, Any]:
         "avg_f1": float(np.mean(f1s) if f1s else 0.0),
         "avg_em": float(np.mean(ems) if ems else 0.0),
         "error_rate": float(np.mean(errs) if errs else 0.0),
-        "n": int(len(rows)),
+        "n": n,
+        "abstain_count": abstain_n,
+        "coverage": float(len(answered) / float(n)) if n > 0 else 0.0,
     }

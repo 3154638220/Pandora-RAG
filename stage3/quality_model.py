@@ -10,7 +10,7 @@ from __future__ import annotations
 附带校准评估工具（Brier Score / ECE）。
 """
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import numpy as np
 from sklearn.linear_model import LogisticRegression
@@ -105,7 +105,7 @@ def predict_success_prob(model: Pipeline, x: np.ndarray) -> np.ndarray:
 # 阈值调优
 # ---------------------------------------------------------------------------
 
-def tune_quality_bar_on_calib(
+def tune_quality_bar_error_based(
     p_hat_stop: np.ndarray,
     error_stop: np.ndarray,
     *,
@@ -119,7 +119,7 @@ def tune_quality_bar_on_calib(
     ph = np.asarray(p_hat_stop, dtype=np.float64).reshape(-1)
     er = np.asarray(error_stop, dtype=np.float64).reshape(-1)
     if ph.size != er.size or ph.size == 0:
-        return 0.5
+        return 0.0
     grid = np.linspace(0.0, 1.0, 101)
     best = 0.0
     for bar in grid:
@@ -130,6 +130,33 @@ def tune_quality_bar_on_calib(
         if rate <= float(target_error) + 1e-9:
             best = float(bar)
     return best
+
+
+def tune_quality_bar_on_calib(
+    p_hat_stop: np.ndarray,
+    error_stop: np.ndarray,
+    *,
+    target_error: float,
+    calib_method: Literal["quantile", "error_rate"] = "quantile",
+) -> float:
+    """
+    在 Calib 上校准 quality_bar。
+
+    - quantile（默认，推荐）：bar = p_hat 的 α 分位数，阻断最低质量的 α 比例停止。
+    - error_rate（保留对照）：最大化 bar 且满足子集经验错误率 <= α。
+    """
+    ph = np.asarray(p_hat_stop, dtype=np.float64).reshape(-1)
+    er = np.asarray(error_stop, dtype=np.float64).reshape(-1)
+    if ph.size == 0:
+        return 0.0
+
+    method = str(calib_method).strip().lower()
+    if method == "quantile":
+        q = float(np.clip(float(target_error), 0.0, 1.0))
+        return float(np.quantile(ph, q))
+    if method == "error_rate":
+        return tune_quality_bar_error_based(ph, er, target_error=target_error)
+    raise ValueError(f"未知 calib_method: {calib_method}")
 
 
 # ---------------------------------------------------------------------------

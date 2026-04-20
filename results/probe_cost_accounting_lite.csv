@@ -1,0 +1,4 @@
+dataset,probe_variant,artifact_suffix,avg_steps,avg_f1,avg_em,retrieval_component,generation_component,feature_overhead_component,probe_forward_component,total_normalized_cost,weight_retrieval,weight_generation,weight_feature_per_step,weight_probe_forward_per_step,empirical_mean_tokens_per_step,empirical_mean_retrieval_calls_per_step
+hotpotqa,lite,_probe_lite,1.682,0.653064,0.514,1.682,1.682,0.033639999999999996,0.016819999999999998,3.41446,1.0,1.0,0.02,0.01,,
+musique,lite,_probe_lite,3.390887290167865,0.3917657074340527,0.3045563549160671,3.390887290167865,3.390887290167865,0.0678177458033573,0.03390887290167865,6.883501199040766,1.0,1.0,0.02,0.01,,
+2wiki,lite,_probe_lite,1.829,0.5854544,0.498,1.829,1.829,0.03658,0.01829,3.7128699999999997,1.0,1.0,0.02,0.01,,

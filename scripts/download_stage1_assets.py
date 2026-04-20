@@ -30,9 +30,9 @@ from pathlib import Path
 # Calib+Dev 从剩余 validation 池中 seed 打乱后各取配额，与 Test 的 id 正交。
 # 若 validation 偏小（如 MuSiQue），prepare_data 会收窄 test，优先保证 Calib+Dev 满额（见 docs/experiments.md A2）。
 HF_SPECS = {
-    "hotpotqa": ("hotpot_qa", "distractor", ("train", "validation")),
-    "musique": ("dgslibisey/MuSiQue", None, ("train", "validation")),
-    "2wiki": ("framolfese/2WikiMultihopQA", None, ("train", "validation", "test")),
+    "hotpotqa": ("hotpot_qa", None, ("train", "validation"), "refs/convert/parquet", "distractor"),
+    "musique": ("dgslibisey/MuSiQue", None, ("train", "validation"), None, None),
+    "2wiki": ("framolfese/2WikiMultihopQA", None, ("train", "validation", "test"), None, None),
 }
 
 LLAMA_ID = "meta-llama/Meta-Llama-3.1-8B-Instruct"
@@ -69,14 +69,23 @@ def _configure_download_env(*, cn_mirror: bool, hf_transfer: bool) -> None:
 def download_datasets() -> None:
     from datasets import load_dataset
 
-    for name, (repo, config, splits) in HF_SPECS.items():
+    for name, (repo, config, splits, revision, data_dir) in HF_SPECS.items():
         print(f"[datasets] {name} <- {repo}" + (f" ({config})" if config else ""))
+        if revision:
+            print(f"  revision={revision}")
+        if data_dir:
+            print(f"  data_dir={data_dir}")
         for sp in splits:
             try:
+                kw: dict = {}
+                if revision:
+                    kw["revision"] = revision
+                if data_dir:
+                    kw["data_dir"] = data_dir
                 if config:
-                    load_dataset(repo, config, split=sp)
+                    load_dataset(repo, config, split=sp, **kw)
                 else:
-                    load_dataset(repo, split=sp)
+                    load_dataset(repo, split=sp, **kw)
                 print(f"  ok split={sp}")
             except Exception as e:
                 print(f"  FAIL split={sp}: {e}", file=sys.stderr)
@@ -202,6 +211,10 @@ def main() -> None:
     if not args.datasets and not args.model and not args.all:
         parser.print_help()
         sys.exit(1)
+
+    from pretest.hf_env import init_pandora_hf_home
+
+    init_pandora_hf_home(root=root)
 
     _configure_download_env(cn_mirror=not args.no_cn_mirror, hf_transfer=args.hf_transfer)
 

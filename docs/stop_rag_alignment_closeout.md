@@ -146,7 +146,12 @@ Stop-RAG 的平均步数来自相邻的 `*.stop_log.jsonl` 中 `stop_iter`；Pan
 
 可选增强：
 
-- 对 Stop-RAG 做多 threshold 在线 sweep，补完整 Pareto 曲线。
+- 对 Stop-RAG 做多 threshold 在线 sweep，补完整 Pareto 曲线。仓库已提供在线 sweep 入口：
+  `baselines/stop-rag-pandora/scripts/stop_rag_threshold_sweep.sh`；跑完后用
+  `python scripts/stop_rag_make_pareto.py` 导出
+  `results/stop_rag_online_threshold_sweep.csv`、
+  `results/stop_rag_online_pareto_frontier.csv`、
+  `results/stop_rag_matched_budget.csv` 与 `docs/stop_rag_threshold_sweep.md`。
 - 统一导出一张 `Pandora / Stop-RAG / Fixed-K=5` 的论文图。
 
 ---

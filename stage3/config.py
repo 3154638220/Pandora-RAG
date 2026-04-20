@@ -33,6 +33,8 @@ class Stage3Config:
     # ---- Quality Model ----
     # 是否将 Probe p_continue 加入质量模型特征
     quality_use_probe_prob: bool = True
+    # quality_bar 校准方式：quantile（推荐）或 error_rate（原版）
+    calib_method: Literal["quantile", "error_rate"] = "quantile"
     quality_max_iter: int = 300
     quality_random_state: int = 42
 
@@ -48,6 +50,14 @@ class Stage3Config:
 
     # ---- 输出 ----
     results_dir: Path = Path("results")
+
+    # ---- 检测后干预（P2）：在 wealth ≥ 1/α 时对当前样本切换策略；主 E-value 仍为 monitor ----
+    # 空元组表示不额外仿真；默认跑三种便于论文/附录对比
+    post_cap_interventions: Tuple[str, ...] = ("abstain", "raise_budget", "fixed_k")
+    # raise_budget：至少走到该步才允许停；0 表示使用 max_k
+    intervention_min_steps: int = 0
+    # fixed_k：保守固定停步；0 表示使用 max_k
+    intervention_fixed_k: int = 0
 
     @property
     def artifacts_probe_dir(self) -> Path:

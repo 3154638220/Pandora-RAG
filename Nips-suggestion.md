@@ -1,560 +1,566 @@
-# Pandora-RAG NeurIPS 投稿评估与补强路线
+# Pandora-RAG 中稿差距审计与改稿路线
 
 > 日期：2026-04-20  
-> 范围：重新审视当前仓库的 README、methods、Stage 1/2/3 报告、Stop-RAG 对齐结果、结果表与主实现后，对 NeurIPS 投稿胜算、主线叙事、风险边界和补强优先级做一次统一修订。  
-> 结论先行：Pandora-RAG 已经具备一篇 NeurIPS-style 方法论文的骨架，但当前还不是“高胜算成稿”。它最适合被包装成 **adaptive stopping for iterative multi-hop RAG + anytime-valid risk monitoring**，而不是 QA SOTA 或“已证明最优的 RAG 系统”。
+> 对象：`Pandora-RAG.tex` 当前快照  
+> 目标：回答“距离中稿还差什么”，并把 NeurIPS 投稿建议从项目路线重构为可执行的论文改稿清单。
+
+## 0. 结论先行
+
+`Pandora-RAG.tex` 已经不是“想法草稿”，而是一篇有完整实验链的论文初稿。它已经具备：
+
+- 明确问题：iterative multi-hop RAG 什么时候停止检索。
+- 方法闭环：Bellman oracle -> neural stopping probe -> E-value risk monitor。
+- 主实验：Fixed-K、Global-Weitzman、Oracle、Probe、Probe+E-value、Probe+CP。
+- 外部对齐：Stop-RAG aligned online threshold sweep。
+- 关键边界：承认 Probe 不统一打赢 best Fixed-K，承认 E-value 是风险证据而不是错误率控制器。
+
+但它还没有到“中稿”。最短判断是：
+
+> 当前主稿约等于 **65% 到 70% 的中稿**。核心实验足够，主要缺口不是再发明方法，而是补齐论文工程、引用系统、Related Work、图表叙事和 appendix 证据链。
+
+如果把“中稿”定义为可以发给外部同学或导师严肃审读的版本，当前还差五类 P0 工作：
+
+1. **可编译投稿包**：仓库当前没有 `neurips_2026.sty`、`.bib`、`checklist.tex`；主稿末尾也保留三条 TODO。
+2. **Related Work 与引用系统**：全文当前没有 `\cite{...}` 和 bibliography，这是最大硬缺口。
+3. **方法总览图和风险监控图**：已有 Pareto 图和 Stop-RAG 图，但缺一张一眼讲清方法链的 Figure 1，以及 E-wealth/no-shift vs shift 证据图。
+4. **主文/附录分工**：现在 Results 很密，Ablations 只有段落式摘要；中稿需要明确哪些结果进正文，哪些进 appendix。
+5. **数值口径统一**：Stage 2 表和 Stage 3 表的 Probe 数值来自不同评估入口，合理但需要一句说明，避免审稿人误以为同一行结果不一致。
+
+推荐路线：
+
+> 不要继续大规模刷实验。先把 `Pandora-RAG.tex` 做成可编译、可引用、可审稿的中稿。新实验只补“缺图表导出/appendix 归档”，不再改变主 claim。
 
 ---
 
-## 1. 总体判断
+## 1. 当前主稿体检
 
-当前项目已经从单纯阶段性实验推进到完整论文胚子：
+### 1.1 结构状态
 
-- **Stage 1** 已有 fixed-order stopping / Bellman oracle / Global-Weitzman 结构化参照。
-- **Stage 2** 已有可部署 Probe、`pdopt_best` 最终 checkpoint、per-step threshold、消融与负结果。
-- **Stage 3** 已完成 E-value 主实验、CP 对比、`4gamma x 4alpha x 3` 稳健性扫描、shift 实验、selective prediction 与统一 Pareto 图。
-- **Stop-RAG** 已完成同 split、同样本 id、真实在线早停的 aligned comparison。
+当前 `Pandora-RAG.tex` 的结构：
 
-因此它不是“还差一个想法”的项目，而是“需要收准主张并补齐若干强审稿点”的项目。
-
-粗略投稿判断：
-
-| 状态 | 投稿判断 |
-| --- | --- |
-| 当前直接写 NeurIPS 主会 | 可以冲，但胜算中等偏低；主要风险是 incremental、best fixed-depth 竞争力强、deployability 成本口径不够干净 |
-| 补 Stop-RAG Pareto + Lite Probe + cost accounting | 有真实竞争力；主张会从“有趣组合”变成“完整方法链” |
-| 再加 config transfer / 跨 backbone 小验证 / 统计显著性 | 可以认真作为 NeurIPS 主会稿打磨 |
-| 时间不足 | EMNLP / ACL Findings / COLM / NeurIPS workshop 更稳 |
-
-最推荐的定位是：
-
-> **Pandora-RAG studies when to stop iterative multi-hop retrieval. It derives a Bellman oracle for the fixed-order stopping structure, learns a deployable stopping signal from oracle-labeled trajectories, and attaches an E-value monitor for anytime-valid online risk evidence.**
-
-中文理解：
-
-> **Pandora 是结构，Probe 是部署停止器，E-value 是风险仪表盘。**
-
----
-
-## 2. 当前项目最强证据
-
-### 2.1 方法结构已经闭环
-
-Pandora-RAG 的三层结构比较适合方法论文：
-
-| 层 | 当前项目对应 | 论文作用 |
+| 模块 | 当前状态 | 中稿判断 |
 | --- | --- | --- |
-| Fixed-order stopping / Bellman oracle | `stage1/run_stage1.py`、Oracle labels、Global-Weitzman | 给出问题结构、上界和训练标签 |
-| Neural stopping probe | `stage2/run_stage2.py`、`ProbeMLP_v2`、`pdopt_best` | 主方法，可部署近似停止器 |
-| E-value monitor | `stage3/run_stage3.py`、`stage3/stopping.py`、`quality_model.py` | 在线风险证据、漂移感知、低开销安全层 |
-| External baseline | `baselines/Stop-RAG/` aligned online results | 证明不是只赢内部 baseline |
+| Title / Abstract | 已有，且主张克制 | 基本可用 |
+| Introduction | 问题、gap、贡献都在 | 需要加引用和更强 opening |
+| Method | Bellman oracle、Probe、E-value 都写清楚 | 基本可用，需加方法图 |
+| Experimental setup | 数据集、split、backbone、metrics 已有 | 需补实现细节和复现入口到 appendix |
+| Results | 主表完整，Stop-RAG 对齐已进入主文 | 内容强，但密度高 |
+| Ablations | 已概括多个负结果 | 中稿需要表格化和 appendix 指向 |
+| Limitations | 写得诚实 | 可保留 |
+| Conclusion | 稳妥 | 可保留 |
+| Related Work | 缺失 | P0 |
+| References | 缺失 | P0 |
+| Checklist | 缺失 | P0 |
+| Appendix | 缺失 | P0/P1 |
 
-这条链比“训练一个 stop classifier”更强，因为它解释了：
+### 1.2 当前最强部分
 
-1. 停止问题为什么有结构。
-2. Oracle 为什么不可部署但能提供监督。
-3. Learned probe 为什么是必要近似。
-4. Learned probe 不完美时为什么需要在线风险监控。
+当前稿件最强的地方是“方法链完整而且 claim 没有吹过头”：
 
-### 2.2 Stage 2: Probe 是低成本 Pareto 点
+- **Bellman oracle** 给出固定检索序列上的结构上界和监督标签。
+- **Probe** 是真正部署的 stopping signal，而不是使用未来 F1 的 oracle。
+- **Lite Probe + cost accounting** 回答了 deployability 和 feature overhead。
+- **E-value monitor** 提供 anytime-valid online risk evidence，而不是声称控制经验错误率。
+- **Stop-RAG threshold sweep** 把外部 baseline 从单点比较升级为 Pareto/frontier 比较。
 
-当前 `pdopt_best` 的稳定结论是：
+这条主线应该保留：
 
-> Probe recovers 79.9% to 85.4% of the DP oracle F1 while using much less retrieval budget than fixed full-depth retrieval. It does **not** uniformly beat the best fixed depth on all datasets.
+> Pandora is the structure, Probe is the deployable stopper, E-value is the monitor.
 
-| 数据集 | Probe F1 / steps | Oracle F1 / steps | Probe / Oracle | Best Fixed-K | Probe vs Best Fixed | Probe vs Fixed-K=5 |
-| --- | ---: | ---: | ---: | --- | ---: | ---: |
-| HotpotQA | 0.6544 / 1.73 | 0.7810 / 1.58 | 83.8% | `K=3`, 0.6775 | -0.0231 | -0.0124 |
-| MuSiQue | 0.3969 / 3.31 | 0.4966 / 2.12 | 79.9% | `K=5`, 0.4022 | -0.0053 | -0.0053 |
-| 2Wiki | 0.5941 / 1.82 | 0.6954 / 1.59 | 85.4% | `K=2`, 0.5908 | +0.0033 | +0.0653 |
+中文写作口径：
 
-推荐写法：
+> Pandora-RAG 把多跳 RAG 的检索深度选择从固定超参改成实例自适应停止，并把这个自适应停止流变成可在线监控的部署对象。
 
-> The learned probe recovers most of the oracle benefit at a substantially lower retrieval depth than full-depth retrieval, while the exact comparison to the best fixed depth remains dataset-dependent.
+### 1.3 当前最大短板
 
-不要写：
+最大短板不是实验，而是“论文像不像一篇 NeurIPS 中稿”：
 
-> The probe outperforms fixed-depth retrieval on all datasets.
+- 没有 Related Work，导致 novelty 无法被定位。
+- 没有引用，所有方法背景和 baseline 背景都悬空。
+- 没有 bibliography，不能编译成正式论文形态。
+- 没有 method overview figure，读者进入 Method 前缺少全局地图。
+- 没有 appendix/checklist，许多补强实验虽然已完成，但没有落到论文结构里。
 
-### 2.3 Stage 3: E-value 是低开销监控层
+当前主稿末尾的 TODO 很准确：
 
-主实验口径：`gamma=0.5, alpha=0.1, predictive betting`。
+- Add Related Work after citation audit.
+- Add bibliography once citation keys are settled.
+- Add NeurIPS checklist when checklist.tex is available.
 
-| 数据集 | 策略 | F1 | EM | Error Rate | Avg Steps |
-| --- | --- | ---: | ---: | ---: | ---: |
-| HotpotQA | Probe | 0.6569 | 0.5190 | 0.3030 | 1.70 |
-| HotpotQA | Probe+E-value | 0.6654 | 0.5290 | 0.2950 | 1.81 |
-| HotpotQA | Probe+CP | 0.6716 | 0.5310 | 0.2960 | 4.11 |
-| MuSiQue | Probe | 0.4152 | 0.3189 | 0.5803 | 3.39 |
-| MuSiQue | Probe+E-value | 0.4127 | 0.3141 | 0.5827 | 3.41 |
-| MuSiQue | Probe+CP | 0.4015 | 0.3046 | 0.5971 | 4.85 |
-| 2Wiki | Probe | 0.5639 | 0.4740 | 0.4090 | 1.82 |
-| 2Wiki | Probe+E-value | 0.5728 | 0.4810 | 0.4010 | 1.91 |
-| 2Wiki | Probe+CP | 0.5383 | 0.4340 | 0.4370 | 4.32 |
-
-稳妥结论：
-
-- `Probe+E-value` 相比 `Probe` 只增加少量步数：HotpotQA `+6.4%`，MuSiQue `+0.5%`，2Wiki `+4.6%`。
-- HotpotQA 和 2Wiki 上 F1 / error 同步小幅改善；MuSiQue 基本持平，是高错误率 stress case。
-- `Probe+CP` 不是稳定强基线：HotpotQA 上能以巨大步数成本换一点 F1，MuSiQue 和 2Wiki 上又贵又差。
-- E-value 的价值是 **online risk evidence / drift sensitivity**，不是把经验错误率压到 `alpha` 以下。
-
-E-wealth 主现象：
-
-| 数据集 | Final E-wealth at alpha=0.1 | Cap | 解读 |
-| --- | ---: | ---: | --- |
-| HotpotQA | 0.014 | 10 | 主实验下更像低成本提质门控，而非告警 |
-| MuSiQue | 4.193 | 10 | 风险证据持续积累但未封顶 |
-| 2Wiki | 10.000 | 10 | 触及 cap，强烈拒绝低错误率原假设 |
-
-### 2.4 Stop-RAG aligned online comparison 是重要外部证据
-
-同 split、同 sample id、真实在线早停：
-
-| 数据集 | 方法 | N | F1 | EM | Avg Steps |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| HotpotQA | Stop-RAG | 1000 | 0.5963 | 0.4640 | 5.000 |
-| HotpotQA | Pandora Probe+E-value | 1000 | 0.6654 | 0.5290 | 1.807 |
-| MuSiQue | Stop-RAG | 417 | 0.2654 | 0.1942 | 4.643 |
-| MuSiQue | Pandora Probe+E-value | 417 | 0.4127 | 0.3141 | 3.410 |
-| 2Wiki | Stop-RAG | 1000 | 0.5076 | 0.4150 | 4.477 |
-| 2Wiki | Pandora Probe+E-value | 1000 | 0.5728 | 0.4810 | 1.905 |
-
-宏平均：
-
-| 方法 | Macro F1 | Macro EM | Macro Steps |
-| --- | ---: | ---: | ---: |
-| Stop-RAG | 0.4564 | 0.3577 | 4.707 |
-| Pandora Probe+E-value | 0.5503 | 0.4414 | 2.374 |
-
-推荐写法：
-
-> Under the aligned online evaluation, Stop-RAG tends to exhaust the retrieval budget, while Pandora achieves higher macro F1 with roughly half the retrieval steps.
-
-边界必须写清楚：这目前是 **single-point online comparison**，不是 Stop-RAG 的完整 threshold-sweep Pareto frontier。主文可以用，但如果要画主 Pareto 对比图，最好补多阈值在线重测。
-
-### 2.5 负结果也很有用
-
-当前项目已经有不少能帮助审稿的负结果：
-
-- `p2_full31` 完整 31 维扩展特征没有提升主工作点，2Wiki 还明显退化。
-- F1 regression 头一致差于 binary Continue 头。
-- GRU / seq-history / mean pooling / compress_dim=512 等没有稳定收益。
-- XGBoost 与 MLP 表明瓶颈更像是特征信息量，而不是模型容量。
-
-这些负结果不应堆进正文，但适合放 appendix，用来回应：
-
-> Is this heavily tuned? Did you try simpler / larger / sequence models?
+中稿的第一目标就是关闭这三条 TODO。
 
 ---
 
-## 3. 最推荐的 NeurIPS 主线
+## 2. 距离中稿还差什么
 
-论文不要写成：
+### P0. 可编译投稿骨架
 
-> We build a stronger RAG system.
+当前仓库检查结果：
 
-也不要写成：
+- `Pandora-RAG.tex` 使用 `\usepackage{neurips_2026}`。
+- 仓库根目录没有发现 `neurips_2026.sty`。
+- 没有 `.bib` 文件。
+- 没有 `checklist.tex`。
+- 图像引用的四个 PNG 已存在：
+  - `results/stage3_final_pareto_all.png`
+  - `results/stop_rag_pareto_hotpotqa.png`
+  - `results/stop_rag_pareto_musique.png`
+  - `results/stop_rag_pareto_2wiki.png`
 
-> We solve optimal stopping for RAG.
+中稿验收标准：
 
-建议中心句：
+- 能执行一次 `pdflatex/bibtex/pdflatex/pdflatex` 或 `latexmk`。
+- 没有 undefined references。
+- 没有 missing figure。
+- bibliography 能生成。
+- NeurIPS checklist 能包含或明确暂缓。
 
-> **Iterative multi-hop RAG stopping is a fixed-order sequential information acquisition problem. Pandora-RAG uses a Bellman oracle to expose the stopping structure, learns a deployable stopping signal from observable states, and attaches an E-value monitor that provides anytime-valid risk evidence under adaptive stopping and distribution shift.**
+建议动作：
 
-三条贡献建议：
+1. 添加 `neurips_2026.sty` 或改成当前可获得的 NeurIPS style。
+2. 新建 `references.bib`。
+3. 在文末加入 `\bibliographystyle{plainnat}` 和 `\bibliography{references}`，或按 NeurIPS 模板使用相应样式。
+4. 加入 `checklist.tex`，即使先填草稿版。
+5. 编译并把 warning 归档成一个短清单。
 
-1. **Fixed-order stopping formulation.**  
-   Formulate iterative multi-hop RAG stopping as a fixed-order finite-horizon optimal stopping problem and derive a Bellman oracle that provides both an upper bound and supervision.
+### P0. Related Work 与 citation audit
 
-2. **Deployable stopping signal.**  
-   Train a neural stopping probe from LLM hidden states and observable features. Across HotpotQA, MuSiQue, and 2Wiki, the probe recovers 79.9% to 85.4% of oracle F1 while using much less retrieval budget than fixed full-depth retrieval.
+这是从初稿到中稿最大的内容缺口。建议新增一个正文 section：
 
-3. **Anytime-valid risk monitoring.**  
-   Attach an E-value monitor to adaptive stopping. The monitor supplies online risk evidence and shift sensitivity with modest retrieval overhead, while static CP gates are costly and dataset-sensitive in this setting.
+```tex
+\section{Related Work}
+```
 
-Stop-RAG 不建议单独列为方法贡献，可以放在实验贡献里：
+放在 Introduction 后或 Method 前。四个小段即可，不要写成百科综述：
 
-> We further reproduce Stop-RAG under an aligned online protocol and show that Pandora improves macro F1 while reducing the average retrieval depth by roughly half.
-
----
-
-## 4. 当前最主要审稿风险
-
-### R1. Probe 没有统一超过 best Fixed-K
-
-这是最直接的审稿风险。HotpotQA 和 MuSiQue 上，Probe 主工作点仍低于最佳 fixed depth。
-
-应对策略：
-
-- 主文强调 **Pareto / budgeted stopping**，不要单点吹 F1。
-- 把 `Fixed-K=1..5` 全部画在 `avg_steps-F1` 平面上。
-- 使用 `Fixed-K=5` 作为 full-depth cost baseline，用 `Best Fixed-K` 作为 quality baseline，两个概念分开。
-- Appendix 放 max-F1 operating point，说明质量优先时 Probe 还能换取更高 F1，但主文坚持 cost-aware 口径。
-
-### R2. E-value 容易被误解成错误率控制器
-
-当前 empirical error rate 远高于 `alpha=0.1`，所以绝不能写：
-
-> E-value controls the error rate below alpha.
-
-正确说法：
-
-> E-value provides anytime-valid evidence against a low-error-rate null and serves as an online monitor. It detects risk accumulation; it does not automatically repair the base stopper.
-
-正文或附录必须把原假设写清楚：
-
-$$
-H_0:\mathbb{E}[e_n|\mathcal{G}_{n-1}]\le \alpha
-$$
-
-以及：
-
-$$
-E_n=\prod_{t=1}^{n}\left(1-\lambda_t+\lambda_t e_t/\alpha\right),\qquad
-P_{H_0}\left(\sup_n E_n\ge 1/\delta\right)\le \delta.
-$$
-
-### R3. Pandora / Weitzman 假设与多跳 RAG 有张力
-
-原始 Pandora's Box 假设更接近独立盒子；多跳 RAG 的下一步检索显然依赖当前状态。
-
-应对策略：
-
-- 用 Pandora 解释 threshold-style information acquisition 的动机。
-- 用 finite-horizon Bellman recursion 作为正式方法：
-
-$$
-V_k^*(s_k)=\max\left(Q(s_k),\mathbb{E}[V_{k+1}^*(s_{k+1})|s_k]-c_{k+1}\right).
-$$
-
-- 把 Global-Weitzman 降格成 structured reference baseline，不说它是部署算法。
-
-### R4. 部署成本口径还不够干净
-
-当前 Full Probe 包含一些可能较贵的 uncertainty / consistency 特征。如果主文说 “lightweight / low-cost deployable”，审稿人会问 stopping overhead 是否抵消检索节省。
-
-应对策略：
-
-- 主文明确区分 `Full Probe` 和 `Lite Probe`。
-- Lite 版本只用 hidden state、retrieval score、step index、cheap lexical / score features。
-- 成本表至少拆成：retrieval steps、generation calls、feature overhead、probe overhead、total normalized cost。
-
-### R5. Per-dataset tuning 风险
-
-当前最佳配置带有明显 dataset-specific：
-
-| 数据集 | compress_dim | margin filter | residual |
-| --- | ---: | ---: | --- |
-| HotpotQA | 256 | 0.0 | False |
-| MuSiQue | 256 | 0.0 | False |
-| 2Wiki | 64 | 0.02 | True |
-
-应对策略：
-
-- 补 `shared default` vs `per-dataset optimal`。
-- 若时间允许，补 config transfer：在一个数据集选配置，迁移到另两个数据集。
-- 来不及补时，把 per-dataset optimal 放 appendix，正文突出主方法而非“统一超参最优”。
-
-### R6. Stop-RAG 目前只是 single-point
-
-当前 aligned result 很强，但 Stop-RAG 审稿人可能会说阈值没调好。
-
-应对策略：
-
-- 最好补 Stop-RAG 多 threshold 在线 sweep。
-- 主图画 `F1 vs avg_steps` Pareto frontier。
-- 若不补，只能写成 aligned online single-point comparison，不承载完整 Pareto claim。
-
-### R7. 绝对 QA F1 不是 SOTA
-
-这个项目不应该和强 QA/RAG backbone 比绝对分数。
-
-应对策略：
-
-- Scope 固定为 stopping efficiency under a fixed RAG backbone。
-- 主比较都使用同 backbone / 同轨迹 / 同 split。
-- 可补一组更强 retriever 或更强 generator 的小规模验证，用来证明 stopping 结论可迁移，而不是为了刷榜。
-
----
-
-## 5. 投稿前补强优先级
-
-### P0: Stop-RAG threshold sweep / Pareto frontier
-
-优先级最高。
-
-要补：
-
-- 对 Stop-RAG 多个 threshold 做真实在线早停测试。
-- 画 `F1 vs avg_steps` 和 `EM vs avg_steps`。
-- 报 matched-budget F1 或达到同 F1 所需步数。
-
-收益：
-
-- 直接化解 “Stop-RAG threshold 没调好” 的质疑。
-- 让外部 baseline 从 single-point 变成真正 Pareto 对手。
-
-### P0: Lite Probe + cost accounting
-
-优先级最高。
-
-建议做：
-
-| 版本 | 特征 | 目的 |
+| 小节 | 要解决的问题 | 必引方向 |
 | --- | --- | --- |
-| Full Probe | 当前完整特征 | 主性能上限 |
-| Lite Probe | hidden state + retrieval scores + step index + cheap features | 部署口径 |
-| Shallow / proxy | self-consistency、entropy、answer stability 等简单规则 | 简单 baseline |
+| Adaptive retrieval and stopping | 说明现有 RAG/iterative retrieval 如何决定是否继续 | IRCoT、ITER-RETGEN、Self-RAG、Adaptive-RAG、FLARE、DRAGIN、Stop-RAG、Probing-RAG |
+| Optimal stopping and Pandora's box | 说明本文的 stopping 结构来自哪里，又为什么不是直接套独立 Pandora | Weitzman Pandora's Box、optimal stopping、metareasoning、contextual/correlated Pandora |
+| Risk control and monitoring | 说明 E-value 与 CP/CRC/LLM risk control 的关系 | conformal prediction、conformal risk control、testing by betting、E-values、selective prediction |
+| Cost-aware LLM systems | 说明本文和 routing/cascades 的相邻关系 | FrugalGPT、LLM cascades、RouteLLM、budgeted inference |
 
-成本表建议：
+Related Work 的目标不是堆 citation，而是给审稿人三句话：
 
-- avg retrieval steps
-- generation calls
-- feature computation overhead
-- probe forward cost
-- total normalized cost
+1. 本文不是又一个 fixed-depth RAG pipeline。
+2. 本文不是声称解决独立 Pandora's Box，而是 fixed-order Bellman stopping。
+3. 本文的风险层不是传统 CP 替代品，而是 adaptive stopped stream 上的 online evidence process。
 
-### P1: Shared default / config transfer
+### P0. Figure 1 方法总览图
 
-要回答：
+当前主文第一张图是 `F1 vs average steps` Pareto 图。它很重要，但不适合作为 Figure 1。中稿需要一张方法图，让读者在 Method 前知道系统怎么流动。
 
-> Is the method robust, or did it require dataset-specific tuning?
+建议 Figure 1 内容：
 
-最低可做：
+```text
+Full rollout trajectories
+  -> Bellman DP oracle
+  -> step labels / continuation margins
+  -> neural probe with hidden states + observable features
+  -> dev threshold selection
+  -> online stopped stream
+  -> E-value monitor / alarm / optional abstention
+```
 
-- 一个 shared default 配置。
-- 与 `per-dataset optimal` 对比。
-- 简短说明性能损失与稳定性。
+图中必须标注两条边界：
 
-更强版本：
+- Oracle sees future realized F1 and is not deployable.
+- Probe/E-value use only observable state before the outcome, except that the E-value update receives revealed evaluation outcome for monitoring.
 
-- HotpotQA 选超参，转 MuSiQue / 2Wiki。
-- MuSiQue 选超参，转 HotpotQA / 2Wiki。
+这样可以提前化解两个审稿误解：
 
-### P1: Shift detection timing
+- “你是不是部署时用了真实 F1？”
+- “E-value 是不是直接修正答案质量？”
 
-E-value 的杀手锏是 online monitoring。
+### P0. 主结果图表重排
 
-建议在主文或 appendix 报：
+当前正文图表已经很多：
 
-- sudden / gradual / periodic shift 下 first cap timing。
-- `samples_after_shift_to_first_cap`。
-- no-shift vs shift 的 wealth trace。
-- CP 固定阈值没有跨样本 risk trajectory。
+- Table 1: dataset splits
+- Table 2: Stage 2 adaptive stopping
+- Table 3: Lite cost audit
+- Figure 1: final Pareto
+- Table 4: Stage 3 risk monitoring
+- Table 5: selective prediction
+- Table 6: Stop-RAG sweep
+- Figure 2: Stop-RAG frontiers
 
-### P1: 统计显著性和 MuSiQue 稳健性
+这对 NeurIPS 正文页数会偏挤。中稿先不一定要压到最终页数，但要明确主文和 appendix 的分工。
 
-MuSiQue test 只有 417 条，且错误率高，容易被质疑。
+推荐主文保留：
 
-建议补：
-
-- paired bootstrap CI for F1。
-- 对 `Probe` vs `Probe+E-value` 和 `Probe+CP` 的 paired comparison。
-- 至少对主表加 95% CI 或 bootstrap std。
-
-### P2: 跨 backbone / retriever 小规模验证
-
-目标不是刷 SOTA，而是证明 stopping 结论不是 BM25 + Llama-3.1-8B 的偶然现象。
-
-可选：
-
-- dense retriever + reranker 小规模。
-- 更强 generator 小规模。
-- 只在 HotpotQA 或 2Wiki 上跑一组 sanity check。
-
-### P2: 检测后干预策略
-
-Selective prediction 已有，但目前更像最小示例。
-
-可补：
-
-- wealth 达 cap 后拒答。
-- wealth 达 cap 后强制更高 retrieval budget。
-- wealth 达 cap 后切换到 conservative fixed-K。
-
-主文可以只放一个最小干预，强调 E-value 是 monitor，intervention 是 policy layer。
-
----
-
-## 6. 主文实验组织
-
-建议正文实验只回答四个问题。
-
-### Q1. Adaptive stopping 是否有 Pareto 价值？
-
-主表 / 主图：
-
-- Fixed-K=1..5
-- Oracle DP
-- Global-Weitzman
-- Probe
-
-结论：
-
-> Probe is a low-cost Pareto point that recovers most oracle benefit, although best fixed depth remains competitive on some datasets.
-
-### Q2. Learned stopping signal 是否必要？
-
-放：
-
-- Deployable-GW 退化到接近 `K=1` 的结果。
-- Shallow-only / XGBoost / hidden ablations。
-- `p2_full31` 作为负结果。
-
-结论：
-
-> Simple proxy thresholds are insufficient; learned signals from hidden representations and oracle labels are necessary.
-
-### Q3. E-value 是否比 CP 更适合 adaptive stopping？
-
-主表：
-
-- Probe
-- Probe+E-value
-- Probe+CP
-
-主图：
-
-- E-wealth trace。
-- cumulative error curve。
-- sudden / gradual / periodic shift trace。
-
-结论：
-
-> E-value is a low-overhead online monitor; CP acts as a static gate and is costly / dataset-sensitive in this setting.
-
-### Q4. 外部 dynamic stopping baseline 怎么样？
-
-主表：
-
-- Stop-RAG aligned online single point。
-- Pandora Probe+E-value。
-
-若补 sweep：
-
-- Stop-RAG frontier vs Pandora frontier。
-
-结论：
-
-> In the aligned online setting, Pandora improves macro F1 while reducing retrieval depth by roughly half.
-
----
-
-## 7. Figures & Tables 建议
-
-### 主文
-
-| 编号 | 内容 | 作用 |
+| 编号 | 内容 | 理由 |
 | --- | --- | --- |
-| Figure 1 | Method overview: Bellman oracle -> Probe -> E-value monitor | 一图讲清方法链 |
-| Table 1 | Fixed-K / Oracle / Global-Weitzman / Probe | 证明 adaptive stopping 的 Pareto 价值 |
-| Figure 2 | Avg steps vs F1 Pareto plot | 避免陷入单点 F1 |
+| Figure 1 | Method overview | 一图讲清贡献链 |
+| Table 1 | Stage 2 main: Fixed-K / Global-Weitzman / Oracle / Probe | 证明 adaptive stopping 的 Pareto 价值 |
+| Figure 2 | F1 vs avg steps Pareto | 防止单点 F1 误读 |
 | Table 2 | Probe / Probe+E-value / Probe+CP | 证明 E-value 低开销，CP 高成本且不稳 |
-| Figure 3 | E-wealth trace under no-shift and shift | 展示 E-value 的 NeurIPS 味道 |
-| Table 3 | Stop-RAG aligned online comparison | 外部 baseline 支撑 |
+| Figure 3 | E-wealth no-shift + shift trace | 展示 online monitoring 的核心价值 |
+| Table 3 | Stop-RAG threshold-sweep best frontier point | 外部 baseline |
 
-### Appendix
+建议挪到 appendix 或压缩：
 
-- Full Fixed-K=1..5。
-- Per-dataset optimal hyperparameters。
-- Shared default / config transfer。
-- p2_full31 negative result。
-- F1 regression / binary / GRU / seq-history / mean pooling ablations。
-- Predictive vs fixed betting。
-- `gamma, alpha` sensitivity。
-- Selective prediction coverage-accuracy。
-- Stop-RAG stopping distribution。
+- dataset split table，可放 setup 段落或 appendix。
+- Lite Probe cost table，可以正文保留三行小表，也可以 appendix 主表，正文一句总结。
+- selective prediction table，建议 appendix，正文只提“可作为 intervention”。
+- 大段 ablation paragraphs，建议表格化后放 appendix。
+
+### P0. 数值口径统一说明
+
+当前主稿里 Stage 2 的 Probe 表和 Stage 3 的 Probe 表数值不同：
+
+- Stage 2 Probe：HotpotQA `0.6544 / 1.73`，MuSiQue `0.3969 / 3.31`，2Wiki `0.5941 / 1.82`。
+- Stage 3 Probe：HotpotQA `0.6569 / 1.70`，MuSiQue `0.4152 / 3.39`，2Wiki `0.5639 / 1.82`。
+
+这不一定是错误，可能来自 Stage 3 的 calibrated/adapter evaluation path、stopped logs 或 monitor evaluation入口。但中稿必须加一句：
+
+> Stage-2 and Stage-3 tables are produced by different evaluation entry points: Stage 2 reports the stopping-probe operating point selected on development data, while Stage 3 re-evaluates the monitor-compatible stopped stream used for E-value and CP comparison. We therefore compare methods within each table rather than treating the two Probe rows as duplicate measurements.
+
+如果实际上它们应当完全一致，则这是 P0 bug，需要回查导出脚本。中稿前必须二选一：解释清楚，或修正对齐。
+
+### P1. Appendix 证据链
+
+已有很多补强实验，但还没有落成 appendix。中稿需要一个 appendix skeleton，哪怕内容先是简表。
+
+建议 appendix 结构：
+
+1. **Implementation Details**
+   - RAG backbone、K=5、generation setting、hidden extraction、feature list。
+2. **Dataset and Split Details**
+   - train/calib/dev/test，MuSiQue test 为 417 的原因。
+3. **Stage-2 Operating Point Selection**
+   - dev threshold selection、cost-aware utility、GW budget cap。
+4. **Lite Probe and Cost Accounting**
+   - Full vs Lite feature list，normalized weights。
+5. **Ablations**
+   - F1 regression、GRU/seq-history、mean pooling、compress dim、p2_full31。
+6. **Shared Configuration and Transfer**
+   - shared default 负结果，per-dataset tuning limitation。
+7. **E-value Robustness**
+   - gamma/alpha grid，predictive vs fixed betting，cap timing。
+8. **Statistical Uncertainty**
+   - paired bootstrap CI and p-values。
+9. **Stop-RAG Details**
+   - thresholds、checkpoint、matched-budget、stopping distribution。
+10. **Cross-Retriever Sanity**
+   - HotpotQA bm25 vs contriever_bge oracle headroom。
+11. **NeurIPS Checklist**
+
+### P1. E-wealth / shift 图
+
+现在主文写了 shift 现象，但没有图。E-value 的 NeurIPS 味道主要来自“在线过程”，不是一张 aggregate table。
+
+建议主文 Figure 3：
+
+- 左：no-shift E-wealth trace，三数据集或代表数据集。
+- 中：sudden shift wealth trace。
+- 右：cumulative error 或 cap timing。
+
+如果空间紧张，正文放一个代表数据集，appendix 放全部 `sudden/gradual/periodic`。
+
+正文推荐句：
+
+> The E-process is useful precisely because it is a trajectory, not a static accept/reject threshold: under degraded streams, wealth accumulates online risk evidence and crosses the alarm boundary.
+
+### P1. 统计显著性放进主文或 appendix
+
+已有 `scripts/stage3_significance.py` 和 `docs/stage3_significance_report.md`。中稿需要至少引用一次这些结果。
+
+主文可写短句：
+
+> Paired bootstrap intervals show that Probe+E-value improves Probe on 2Wiki by 0.0089 F1 with 95% CI [0.0017, 0.0165], is borderline on HotpotQA, and is statistically indistinguishable on MuSiQue.
+
+这句话的作用不是吹显著性，而是主动管住 MuSiQue 风险。
+
+### P1. Shared default / config transfer 作为 limitation
+
+已有 shared default 审计，结论偏负：
+
+- strict shared default macro F1/steps：`0.3551 / 3.056`
+- per-dataset operating points macro F1/steps：`0.5485 / 2.286`
+
+这不适合当正结果，但很适合当诚实 limitation：
+
+> The strongest operating points are selected per dataset on development data. A strict shared-configuration audit is substantially weaker, suggesting that current stopping features and thresholds remain dataset-sensitive.
+
+这句话可以放 Limitations，也可以 appendix。
+
+### P2. Cross-backbone / retriever sanity
+
+已有 HotpotQA small-scale diagnostic：
+
+| Retriever | Oracle F1 | Best Fixed-K F1 | Oracle gain |
+| --- | ---: | ---: | ---: |
+| bm25 | 0.7390 | 0.6133 | +0.1257 |
+| contriever_bge | 0.7642 | 0.6760 | +0.0882 |
+
+建议只放 appendix，不要扩成主 claim。它证明的是：
+
+> stopping headroom exists beyond the default retriever.
+
+不要写成：
+
+> Pandora is backbone-independent.
 
 ---
 
-## 8. 写作红线
+## 3. 当前主 claim 应该怎样写
+
+### 3.1 推荐中心句
+
+> Iterative multi-hop RAG stopping is a fixed-order sequential information acquisition problem. Pandora-RAG exposes the stopping structure with a Bellman oracle, learns a deployable continuation signal from observable states, and attaches an E-value monitor that provides anytime-valid online risk evidence for the adaptively stopped stream.
+
+中文版本：
+
+> 多跳 RAG 的关键不是固定检索几步，而是在已观察到的证据状态下判断下一步检索是否值得。Pandora-RAG 用 Bellman oracle 暴露这个停止结构，用 Probe 学可部署的停止信号，再用 E-value 给自适应停止后的输出流提供在线风险证据。
+
+### 3.2 三条贡献
+
+1. **Fixed-order stopping formulation**
+   - 将 iterative multi-hop RAG stopping 表述为 fixed-order finite-horizon optimal stopping。
+   - 用 Bellman oracle 作为 upper bound 和 supervision。
+
+2. **Deployable stopping signal**
+   - 从 LLM hidden states 和 observable retrieval/state features 训练 continuation probe。
+   - Probe 恢复 `79.9%` 到 `85.4%` oracle F1，使用远少于 full-depth 的检索步数。
+   - Lite Probe 和 cost accounting 说明部署开销不会让结论失效。
+
+3. **Anytime-valid monitoring**
+   - 将 E-value process 接到 adaptively stopped stream。
+   - 它提供 online risk evidence 和 shift sensitivity。
+   - 它不是 empirical error-rate controller，不保证把错误率压到 alpha 以下。
+
+Stop-RAG 对齐建议作为实验贡献，而不是方法贡献：
+
+> We further reproduce Stop-RAG under an aligned online threshold sweep and show that Pandora-RAG attains higher F1 and EM with fewer retrieval steps on all three benchmarks.
+
+### 3.3 不要写的 claim
 
 不要写：
 
 - `provably optimal deployed RAG system`
 - `E-value controls the error rate below alpha`
 - `Probe uniformly outperforms fixed-depth retrieval`
-- `CP is invalid in all adaptive settings`
-- `single-pass low-cost deployable`，除非补了 Lite Probe 与成本表
-- `learned exact reservation value`
+- `CP is invalid in adaptive settings`
 - `state-of-the-art multi-hop QA`
+- `learned exact reservation values`
+- `feature pruning greatly reduces total inference cost`
 
 可以写：
 
-- `fixed-order optimal stopping formulation`
+- `fixed-order optimal stopping`
 - `Bellman oracle upper bound`
-- `oracle-labeled adaptive stopping`
-- `learned stopping signal`
-- `continuation-decision estimator`
+- `oracle-labeled stopping supervision`
+- `deployable continuation-decision estimator`
 - `cost-quality Pareto tradeoff`
+- `Lite Probe with normalized cost accounting`
 - `anytime-valid online risk evidence`
-- `distribution-shift sensitivity`
-- `aligned online Stop-RAG comparison`
+- `aligned online Stop-RAG threshold sweep`
 
 ---
 
-## 9. Abstract 草稿
+## 4. 逐段改稿建议
 
-可以从这版开始改：
+### Abstract
 
-> Iterative multi-hop retrieval can improve complex question answering, but each additional retrieval step incurs latency and may introduce distracting evidence. We study when to stop retrieval. We formulate iterative RAG stopping as a fixed-order finite-horizon optimal stopping problem and derive a Bellman oracle that provides both an upper bound and supervision for stopping decisions. Since oracle answer quality is unobservable at deployment time, Pandora-RAG trains a neural stopping probe from LLM hidden states and observable retrieval features. To make adaptive stopping monitorable in deployment, we attach an E-value process that supplies anytime-valid risk evidence under data-adaptive stopping and distribution shift. Across HotpotQA, MuSiQue, and 2Wiki, the probe recovers 79.9% to 85.4% of oracle F1 while using far fewer retrieval steps than fixed full-depth retrieval. The E-value monitor adds only modest retrieval overhead relative to the probe, outperforms static CP gates in cost-quality tradeoff on two of three datasets, and provides online drift-sensitive risk traces. Under an aligned online evaluation, Pandora also improves macro F1 over Stop-RAG while reducing average retrieval depth by roughly half.
+当前摘要已经稳妥。中稿前建议压缩两处：
 
-如果摘要字数紧张，Stop-RAG 句子移到 Introduction 贡献段。
+- “probe recovers 79.9--85.4% of oracle F1”保留。
+- “E-value changes average retrieval depth by 0.5--6.4%”保留。
+- Stop-RAG 句子保留，但如果摘要超字数，可移到 Introduction 贡献段。
+
+摘要里不要额外加入“controls risk”之类强措辞。
+
+### Introduction
+
+当前 Introduction 逻辑顺，但中稿需要更强的 problem framing 和 citation hooks。
+
+推荐五段结构：
+
+1. Iterative retrieval 的 deployment dilemma。
+2. Fixed depth 为什么不够。
+3. Stopping 为什么难：真实 F1 不可观测，继续价值依赖状态。
+4. Adaptive stopping 后为什么需要 online monitoring。
+5. 本文贡献和主要实证结果。
+
+建议新增一句：
+
+> The stopped stream is itself a deployment object: once stopping depends on model states, a monitoring layer should reason about the sequence of stopped outcomes rather than a fixed-depth offline table alone.
+
+### Method
+
+Method 基本可用。建议补三点：
+
+- 在 Section 2 开头加一段“overview and notation”，对应 Figure 1。
+- 在 Bellman oracle 段明确“fixed-order, state-dependent, not classical independent-box Pandora”。
+- 在 E-value 段强调 outcome is revealed only for monitoring/evaluation, not for choosing the current answer。
+
+### Experimental Setup
+
+当前 setup 可读，但中稿建议加一小段：
+
+- compute/hardware 可放 appendix。
+- generation deterministic setting 和 retriever/generator 版本可放 appendix。
+- Stop-RAG checkpoint 和 thresholds 放 appendix。
+
+### Results
+
+建议重排为四个问题：
+
+1. **Does adaptive stopping give a useful Pareto point?**
+   - Fixed-K / Global-Weitzman / Oracle / Probe。
+2. **Is the stopping signal deployable?**
+   - Lite Probe + cost accounting，正文可短。
+3. **Does E-value monitoring add low-overhead risk evidence?**
+   - Probe / Probe+E-value / Probe+CP。
+4. **How does Pandora compare to Stop-RAG?**
+   - aligned online threshold sweep。
+
+当前 Results 的内容都在，但第 2 和第 3 个问题之间有点挤。中稿可把 selective prediction 移 appendix。
+
+### Ablations and Robustness
+
+当前是 paragraph list。中稿建议至少做一个 appendix table：
+
+| Ablation | Outcome | Interpretation |
+| --- | --- | --- |
+| F1 regression | worse than binary stopping labels | continuation labels are more reliable |
+| p2_full31 | no main-point gain | more shallow features did not solve bottleneck |
+| GRU / seq-history | no stable gain | sequence model capacity not bottleneck |
+| mean pooling / blend | no stable gain | last-token hidden state is adequate for current setup |
+| shared config | much weaker | per-dataset tuning remains limitation |
+
+正文保留 2 到 3 个最关键结论即可。
+
+### Limitations
+
+Limitations 现在很诚实，是优点。中稿建议保留，并补一句：
+
+> The current manuscript uses per-dataset development-selected operating points; strict shared-configuration transfer remains substantially weaker.
+
+### Conclusion
+
+当前可用。最终成稿时可以更短。
 
 ---
 
-## 10. Introduction 结构建议
+## 5. 审稿风险矩阵
 
-1. **Deployment dilemma**  
-   Iterative multi-hop RAG 每多检索一步可能找到 bridge evidence，也可能增加延迟、成本和噪声。
-
-2. **Why fixed depth is wrong**  
-   不同 query 的边际收益高度异质；固定 K 会浪费简单样本预算，也会在难样本上缺乏风险感知。
-
-3. **Why stopping is hard**  
-   部署时看不到真实 F1；简单 proxy 不可靠；自适应停止让静态 calibration / CP 难以提供跨样本在线风险轨迹。
-
-4. **Our answer**  
-   Bellman oracle 暴露结构，Probe 学可部署近似，E-value 提供 anytime-valid risk evidence。
-
-5. **Evidence**  
-   三数据集 Pareto 结果、E-value vs CP、shift trace、Stop-RAG aligned online comparison。
+| 风险 | 严重度 | 当前状态 | 中稿应对 |
+| --- | --- | --- | --- |
+| 没有引用和 Related Work | 高 | 未补 | P0 立即补 |
+| 不能编译 | 高 | style/bib/checklist 缺失 | P0 立即补 |
+| Probe 没统一超过 best Fixed-K | 高 | 已诚实处理 | 用 Pareto/budgeted framing |
+| E-value 被误解成 error control | 高 | 主文已克制 | 保留 null 和 Ville inequality，避免硬控制措辞 |
+| Stop-RAG 阈值没调好 | 中 | threshold sweep 已补 | 说明 fixed checkpoint + sweep，不声称重训 |
+| per-dataset tuning | 中 | shared default 偏负 | 放 limitation/appendix |
+| MuSiQue 样本小且高错误 | 中 | CI 已补 | 写成 stress case |
+| 部署开销 | 中 | Lite + accounting 已补 | 不夸大 total cost 降幅 |
+| backbone 依赖 | 中 | small retriever sanity 已补 | appendix 限定为 diagnostic |
+| 绝对 QA 分数非 SOTA | 中 | 口径清楚 | 固定为 stopping efficiency under same backbone |
 
 ---
 
-## 11. Related Work 组织
+## 6. 中稿验收清单
 
-建议四小节：
+### 必须完成
 
-1. **Adaptive Retrieval and Stopping**  
-   IRCoT、ITER-RETGEN、Self-RAG、Adaptive-RAG、FLARE、DRAGIN、Stop-RAG、Probing-RAG。
+- [ ] 加入 `neurips_2026.sty` 或可用投稿 style。
+- [ ] 新建 `references.bib`。
+- [ ] 全文加入 citation keys。
+- [ ] 新增 Related Work。
+- [ ] 新增 bibliography。
+- [ ] 新增或暂存 NeurIPS checklist。
+- [ ] 添加 Figure 1 method overview。
+- [ ] 添加 E-wealth/no-shift vs shift 图，或明确移 appendix。
+- [ ] 解释 Stage 2 / Stage 3 Probe 数值口径差异。
+- [ ] 至少一次完整编译。
 
-2. **Optimal Stopping and Pandora's Box**  
-   Weitzman、contextual / correlated Pandora、rational metareasoning。强调本文不是直接套独立 Pandora，而是 fixed-order Bellman 视角。
+### 强烈建议完成
 
-3. **Risk Control for LLMs and RAG**  
-   Conformal risk control、Conformal-RAG、CCPO、selective prediction。强调本文关注 adaptive stopping stream 上的 online risk evidence。
+- [ ] Appendix skeleton。
+- [ ] Ablation table。
+- [ ] Lite Probe cost accounting table 或 appendix 表。
+- [ ] Shared config/transfer negative result 写入 limitation。
+- [ ] Paired bootstrap CI 写入 appendix。
+- [ ] Stop-RAG thresholds/checkpoint/stopping distribution 写入 appendix。
 
-4. **Cost-aware LLM Routing and Cascades**  
-   FrugalGPT、RouteLLM、LLM cascades。强调 routing / cascade 和 iterative retrieval depth control 的相似与差异。
+### 可选完成
+
+- [ ] Cross-retriever sanity table。
+- [ ] cap timing table。
+- [ ] selective prediction table 移 appendix。
+- [ ] 更强 generator 小样本验证，不建议作为中稿阻塞项。
 
 ---
 
-## 12. 最终建议
+## 7. 推荐改稿顺序
 
-当前项目可以冲 NeurIPS，但最危险的写法是：
+### Day 1: 论文骨架闭环
 
-> 我们提出一个几乎解决多跳 RAG 最优停止的强系统。
+1. 加 NeurIPS style、bib、checklist。
+2. 新建 Related Work 占位并插入 citations。
+3. 跑一次编译，生成 warning 清单。
 
-最有胜算的写法是：
+验收：
 
-> 我们把 iterative multi-hop RAG 的停止问题结构化为 fixed-order sequential information acquisition，用 Bellman oracle 生成监督信号，训练一个可部署 adaptive stopper，并用 E-value 给这个自适应停止器加上 online risk monitoring。
+- PDF 能生成。
+- 不再有“无 bibliography”的硬伤。
 
-如果投稿前只能再做三件事，建议顺序是：
+### Day 2: 图表与主线
 
-1. Stop-RAG threshold sweep / Pareto frontier。
-2. Lite Probe + cost accounting。
-3. Shared default / config transfer 或 MuSiQue bootstrap CI。
+1. 画 Figure 1 method overview。
+2. 选择一张 E-wealth/shift 图进入正文。
+3. 重排 Results，压缩 selective prediction 和部分 Lite 内容。
 
-如果这三件补齐，Pandora-RAG 的主线会从“有趣但可能 incremental 的组合”提升为“问题定义清楚、方法链完整、实验口径可信”的投稿状态。
+验收：
+
+- 读者不看代码也能理解三层方法。
+- Results 从“堆表”变成四个问题。
+
+### Day 3: Appendix 与风险口径
+
+1. 建 appendix skeleton。
+2. 填 ablation table、significance、shared config、Stop-RAG details。
+3. 检查所有 claims 是否符合写作红线。
+
+验收：
+
+- 审稿人可能问的“阈值、调参、显著性、外部 baseline、成本”都有落点。
+
+### Day 4: 语言打磨
+
+1. 压缩重复表述。
+2. 统一 notation。
+3. 检查 Figure/Table caption 是否自洽。
+4. 重新编译。
+
+验收：
+
+- 可以发给外部读者审稿。
+
+---
+
+## 8. 当前投稿判断
+
+当前项目的实验资产已经足够支撑一篇 NeurIPS-style 方法论文，但 `Pandora-RAG.tex` 还处在“强初稿”而非“中稿”。
+
+最合理的投稿定位：
+
+> A cost-aware adaptive stopping framework for iterative multi-hop RAG, with a Bellman oracle for structure and supervision, a deployable neural stopping probe, and an anytime-valid E-value monitor for the adaptively stopped stream.
+
+最危险的投稿定位：
+
+> A new SOTA multi-hop QA system with provably optimal stopping and guaranteed low error.
+
+中稿前不建议继续追求大规模新实验。真正高杠杆的工作是：
+
+1. 让论文能编译。
+2. 让论文有引用和 Related Work。
+3. 让方法链一图讲清。
+4. 让 appendix 承接已有补强实验。
+5. 让所有 claim 都落在 Pareto、monitoring、fixed-order stopping 的安全边界内。
+
+一句话：
+
+> 离中稿不远，但差的是论文形态，不是实验主干。把引用、Related Work、方法图、E-wealth 图、appendix 和编译链补齐后，它就能进入真正的中稿审读阶段。

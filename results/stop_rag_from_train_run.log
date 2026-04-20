@@ -1,0 +1,62 @@
+=== Stop-RAG 续跑（仅训练+选参+测试）| /home/x12dpg/hjx/Pandora-RAG/results/stop_rag_from_train_20260419_105819.log ===
+=== train.sh hotpotqa ===
+/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/transformers/convert_slow_tokenizer.py:566: UserWarning: The sentencepiece tokenizer that you are converting to a fast tokenizer uses the byte fallback option which is not implemented in the fast tokenizers. In practice this means that the fast version of the tokenizer can produce unknown tokens whereas the sentencepiece version would have converted these unknown tokens into a sequence of byte tokens matching the original piece of text.
+  warnings.warn(
+Model and tokenizer loaded successfully.
+Trainable params: 436,113,410 || All params: 436,113,410 || Trainable%: 100.00%
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/x12dpg/hjx/Pandora-RAG/baselines/Stop-RAG/src/train/stop_rag_train.py", line 734, in <module>
+    main(args)
+  File "/home/x12dpg/hjx/Pandora-RAG/baselines/Stop-RAG/src/train/stop_rag_train.py", line 647, in main
+    training_args = TrainingArguments(
+                    ^^^^^^^^^^^^^^^^^^
+  File "<string>", line 135, in __init__
+  File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/transformers/training_args.py", line 1811, in __post_init__
+    self.device
+  File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/transformers/training_args.py", line 2355, in device
+    return self._setup_devices
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/functools.py", line 1001, in __get__
+    val = self.func(instance)
+          ^^^^^^^^^^^^^^^^^^^
+  File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/transformers/training_args.py", line 2282, in _setup_devices
+    self.distributed_state = PartialState(**accelerator_state_kwargs)
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/accelerate/state.py", line 206, in __init__
+    raise ImportError(
+ImportError: DeepSpeed is not available => install it using `pip3 install deepspeed` or build it from source
+E0419 11:02:00.656000 2062545 site-packages/torch/distributed/elastic/multiprocessing/api.py:984] failed (exitcode: 1) local_rank: 0 (pid: 2062617) of binary: /home/x12dpg/miniconda3/envs/pandora-rag/bin/python3.11
+Traceback (most recent call last):
+  File "/home/x12dpg/miniconda3/envs/pandora-rag/bin/torchrun", line 6, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 362, in wrapper
+    return f(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/torch/distributed/run.py", line 991, in main
+    run(args)
+  File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/torch/distributed/run.py", line 982, in run
+    elastic_launch(
+  File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/torch/distributed/launcher/api.py", line 170, in __call__
+    return launch_agent(self._config, self._entrypoint, list(args))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/torch/distributed/launcher/api.py", line 317, in launch_agent
+    raise ChildFailedError(
+torch.distributed.elastic.multiprocessing.errors.ChildFailedError: 
+============================================================
+src.train.stop_rag_train FAILED
+------------------------------------------------------------
+Failures:
+  <NO_OTHER_FAILURES>
+------------------------------------------------------------
+Root Cause (first observed failure):
+[0]:
+  time      : 2026-04-19_11:02:00
+  host      : x12dpg-Super-Server
+  rank      : 0 (local_rank: 0)
+  exitcode  : 1 (pid: 2062617)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+============================================================

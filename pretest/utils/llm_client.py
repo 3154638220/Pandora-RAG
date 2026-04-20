@@ -7,23 +7,20 @@ LLM 调用客户端。
 import logging
 import math
 import random
+import re
 import time
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+from qa_shared.prompts import (
+    INTERMEDIATE_ANSWER_GENERATION_SYSTEM_PROMPT,
+    format_answer_prompt,
+    format_intermediate_answer_prompt,
+    format_query_generation_prompt,
+    get_query_generation_system_prompt,
+)
 
 logger = logging.getLogger(__name__)
-
-ANSWER_PROMPT = """\
-你是一个严谨的问答助手。请根据以下检索到的上下文回答问题。
-如无法确定，仍需给出最佳猜测，请直接输出答案（一个词组或短语），不要解释。
-
-问题：{question}
-
-已检索上下文：
-{context}
-
-答案："""
 
 SELF_EVAL_PROMPT = """\
 你是答案质量评审器。请根据问题、上下文和候选答案，给出 1 到 5 的整数分数：
@@ -75,6 +72,38 @@ class LLMClient:
                 logger.warning("openai 包未安装，降级为 mock 模式。")
                 self._mock = True
 
+    def _chat_completion(
+        self,
+        messages: List[Dict[str, str]],
+        *,
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        extract_features: bool = False,
+        n: int = 1,
+    ):
+        kwargs = dict(
+            model=self.cfg.model_name,
+            messages=messages,
+            max_tokens=max_tokens if max_tokens is not None else self.cfg.max_tokens,
+            temperature=self.cfg.temperature if temperature is None else float(temperature),
+            n=max(1, int(n)),
+        )
+        if extract_features:
+            kwargs["logprobs"] = True
+            kwargs["top_logprobs"] = 5
+        try:
+            return self._client.chat.completions.create(**kwargs), extract_features
+        except Exception as e_inner:
+            if extract_features:
+                logger.warning(
+                    "带 logprobs 的请求失败（%s），改用无 logprobs 重试（部分本地服务不支持）。",
+                    e_inner,
+                )
+                kwargs.pop("logprobs", None)
+                kwargs.pop("top_logprobs", None)
+                return self._client.chat.completions.create(**kwargs), False
+            raise
+
     # ──────────────────────────────────────────────────────────
     def generate(
         self,
@@ -91,34 +120,15 @@ class LLMClient:
           entropy      : float top-logprobs 估计的平均熵（越低越自信）
           token_count  : int   生成 token 数
         """
-        prompt = ANSWER_PROMPT.format(question=question, context=context)
+        prompt = format_answer_prompt(question=question, context=context)
         if self._mock:
             return self._mock_generate(context)
 
         try:
-            kwargs = dict(
-                model=self.cfg.model_name,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=self.cfg.max_tokens,
-                temperature=self.cfg.temperature,
+            response, extract_features = self._chat_completion(
+                [{"role": "user", "content": prompt}],
+                extract_features=extract_features,
             )
-            if extract_features:
-                kwargs["logprobs"] = True
-                kwargs["top_logprobs"] = 5
-            try:
-                response = self._client.chat.completions.create(**kwargs)
-            except Exception as e_inner:
-                if extract_features:
-                    logger.warning(
-                        "带 logprobs 的请求失败（%s），改用无 logprobs 重试（部分本地服务不支持）。",
-                        e_inner,
-                    )
-                    kwargs.pop("logprobs", None)
-                    kwargs.pop("top_logprobs", None)
-                    response = self._client.chat.completions.create(**kwargs)
-                    extract_features = False
-                else:
-                    raise
             answer = (response.choices[0].message.content or "").strip()
             mean_logprob, entropy, token_count = self._extract_features(
                 response.choices[0].logprobs
@@ -147,7 +157,7 @@ class LLMClient:
         返回 (answers, meta)，meta 含 token_count（近似每完成一次）、latency_ms、answer_logprob。
         其中 answer_logprob 对应首个采样答案（通常即 Stage1 当前答案）的平均 token logprob。
         """
-        prompt = ANSWER_PROMPT.format(question=question, context=context)
+        prompt = format_answer_prompt(question=question, context=context)
         n = max(1, int(n))
         t0 = time.perf_counter()
 
@@ -169,17 +179,13 @@ class LLMClient:
             return out, {"token_count": float(tc), "latency_ms": lat, "answer_logprob": -1.0}
 
         try:
-            kwargs = dict(
-                model=self.cfg.model_name,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=self.cfg.max_tokens,
-                temperature=float(temperature),
-                n=n,
-                logprobs=True,
-                top_logprobs=5,
-            )
             try:
-                response = self._client.chat.completions.create(**kwargs)
+                response, used_logprobs = self._chat_completion(
+                    [{"role": "user", "content": prompt}],
+                    temperature=float(temperature),
+                    extract_features=True,
+                    n=n,
+                )
             except Exception as e_inner:
                 logger.warning(
                     "批量 n=%d 请求失败（%s），先改无 logprobs 重试，再回退逐条采样。",
@@ -187,18 +193,20 @@ class LLMClient:
                     e_inner,
                 )
                 try:
-                    kwargs.pop("logprobs", None)
-                    kwargs.pop("top_logprobs", None)
-                    response = self._client.chat.completions.create(**kwargs)
+                    response, used_logprobs = self._chat_completion(
+                        [{"role": "user", "content": prompt}],
+                        temperature=float(temperature),
+                        extract_features=False,
+                        n=n,
+                    )
                 except Exception:
                     texts = []
                     tok_sum = 0
                     for _ in range(n):
-                        one = self._client.chat.completions.create(
-                            model=self.cfg.model_name,
-                            messages=[{"role": "user", "content": prompt}],
-                            max_tokens=self.cfg.max_tokens,
+                        one, _ = self._chat_completion(
+                            [{"role": "user", "content": prompt}],
                             temperature=float(temperature),
+                            extract_features=False,
                         )
                         texts.append((one.choices[0].message.content or "").strip())
                         u = getattr(one, "usage", None)
@@ -212,7 +220,7 @@ class LLMClient:
             u = getattr(response, "usage", None)
             ct = int(getattr(u, "completion_tokens", 0) or 0) if u is not None else 0
             tc = (ct / float(n)) if ct > 0 else float(len(texts[0].split()) if texts else 1)
-            first_logprob = self._extract_mean_logprob_from_choice(response.choices[0]) if texts else 0.0
+            first_logprob = self._extract_mean_logprob_from_choice(response.choices[0]) if (texts and used_logprobs) else 0.0
             lat = (time.perf_counter() - t0) * 1000.0
             return texts, {"token_count": tc, "latency_ms": lat, "answer_logprob": first_logprob}
         except Exception as e:
@@ -233,6 +241,43 @@ class LLMClient:
             tc = max(1, sum(len(a.split()) for a in out) // n)
             return out, {"token_count": float(tc), "latency_ms": lat, "answer_logprob": -1.0}
 
+    def generate_intermediate_answer(self, question: str, document: str) -> str:
+        prompt = format_intermediate_answer_prompt(question=question, document=document)
+        if self._mock:
+            return self._mock_generate(document)["answer"]
+        try:
+            response, _ = self._chat_completion(
+                [
+                    {"role": "system", "content": INTERMEDIATE_ANSWER_GENERATION_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                extract_features=False,
+            )
+            return (response.choices[0].message.content or "").strip()
+        except Exception as e:
+            logger.error("intermediate answer 调用失败：%s，降级为 mock。", e)
+            return self._mock_generate(document)["answer"]
+
+    def generate_follow_up_query(self, question: str, trace: str, retriever_backend: str) -> str:
+        user_prompt = format_query_generation_prompt(question=question, trace=trace)
+        if self._mock:
+            return question
+        try:
+            response, _ = self._chat_completion(
+                [
+                    {"role": "system", "content": get_query_generation_system_prompt(retriever_backend)},
+                    {"role": "user", "content": user_prompt},
+                ],
+                max_tokens=128,
+                temperature=0.0,
+                extract_features=False,
+            )
+            text = (response.choices[0].message.content or "").strip()
+            return self._extract_query(text, question)
+        except Exception as e:
+            logger.error("follow-up query 调用失败：%s，回退为原问题。", e)
+            return question
+
     def self_evaluate_score(self, question: str, context: str, answer: str) -> float:
         """让模型对当前答案打 1~5 分；失败时返回 0。"""
         if self._mock:
@@ -250,11 +295,7 @@ class LLMClient:
                 temperature=0.0,
             )
             text = (response.choices[0].message.content or "").strip()
-            m = None
-            if text:
-                import re
-
-                m = re.search(r"([1-5])", text)
+            m = re.search(r"([1-5])", text) if text else None
             if not m:
                 return 0.0
             return float(int(m.group(1)))
@@ -268,6 +309,14 @@ class LLMClient:
         lp_obj = getattr(choice, "logprobs", None)
         mean_lp, _, _ = LLMClient._extract_features(lp_obj)
         return float(mean_lp)
+
+    @staticmethod
+    def _extract_query(text: str, fallback: str) -> str:
+        line = text.strip().splitlines()[0].strip() if text.strip() else ""
+        if not line:
+            return fallback
+        line = re.sub(r"^(follow[\s-]*up:\s*)", "", line, flags=re.IGNORECASE).strip()
+        return line or fallback
 
     # ──────────────────────────────────────────────────────────
     @staticmethod

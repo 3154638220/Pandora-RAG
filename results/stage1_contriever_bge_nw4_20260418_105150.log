@@ -1,0 +1,23 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/x12dpg/hjx/Pandora-RAG/stage1/run_stage1.py", line 1739, in <module>
+    main()
+  File "/home/x12dpg/hjx/Pandora-RAG/stage1/run_stage1.py", line 1687, in main
+    hidden_state_extractor = HiddenStateExtractor(cfg)
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/x12dpg/hjx/Pandora-RAG/stage1/run_stage1.py", line 340, in __init__
+    self.device = _resolve_hidden_state_device(torch)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/x12dpg/hjx/Pandora-RAG/stage1/run_stage1.py", line 284, in _resolve_hidden_state_device
+    free_b, _total_b = torch_module.cuda.mem_get_info(idx)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/torch/cuda/memory.py", line 897, in mem_get_info
+    return torch.cuda.cudart().cudaMemGetInfo(device)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+torch.AcceleratorError: CUDA error: out of memory
+Search for `cudaErrorMemoryAllocation' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+

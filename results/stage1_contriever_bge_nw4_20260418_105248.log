@@ -1,0 +1,32 @@
+`torch_dtype` is deprecated! Use `dtype` instead!
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards:  25%|██▌       | 1/4 [00:00<00:02,  1.43it/s]Loading checkpoint shards:  50%|█████     | 2/4 [00:01<00:01,  1.40it/s]Loading checkpoint shards:  75%|███████▌  | 3/4 [00:02<00:00,  1.28it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:02<00:00,  1.81it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:02<00:00,  1.61it/s]
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/x12dpg/hjx/Pandora-RAG/stage1/run_stage1.py", line 1739, in <module>
+    main()
+  File "/home/x12dpg/hjx/Pandora-RAG/stage1/run_stage1.py", line 1687, in main
+    hidden_state_extractor = HiddenStateExtractor(cfg)
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/x12dpg/hjx/Pandora-RAG/stage1/run_stage1.py", line 352, in __init__
+    self.model.to(self.device)
+  File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/transformers/modeling_utils.py", line 4343, in to
+    return super().to(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1381, in to
+    return self._apply(convert)
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/torch/nn/modules/module.py", line 933, in _apply
+    module._apply(fn)
+  File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/torch/nn/modules/module.py", line 933, in _apply
+    module._apply(fn)
+  File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/torch/nn/modules/module.py", line 933, in _apply
+    module._apply(fn)
+  [Previous line repeated 2 more times]
+  File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/torch/nn/modules/module.py", line 964, in _apply
+    param_applied = fn(param)
+                    ^^^^^^^^^
+  File "/home/x12dpg/miniconda3/envs/pandora-rag/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1367, in convert
+    return t.to(
+           ^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 32.00 MiB. GPU 3 has a total capacity of 23.64 GiB of which 11.31 MiB is free. Process 1730014 has 20.24 GiB memory in use. Including non-PyTorch memory, this process has 3.37 GiB memory in use. Of the allocated memory 3.01 GiB is allocated by PyTorch, and 21.92 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
