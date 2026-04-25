@@ -1,0 +1,4 @@
+dataset,suffix,dev_f1,dev_em,dev_steps,test_f1,test_em,test_steps,test_cost,probe_target,probe_feature_mode,train_margin_min_abs,hidden_branch_residual,threshold_policy_type,per_step_thresholds,baseline_suffix,baseline_test_f1,baseline_test_steps,delta_test_f1_vs_baseline,delta_test_steps_vs_baseline
+hotpotqa,d3_exp2_focal1,0.5350185000000001,0.42,3.006,0.5260359,0.413,2.999,0.14995,,full,0.0,False,global,,pdopt_best,0.6544063000000001,1.732,-0.1283704000000001,1.2670000000000001
+musique,d3_exp2_focal1,0.22313460000000004,0.155,2.993,0.18114364508393285,0.12470023980815348,3.1270983213429258,0.1563549160671463,,full,0.0,False,global,,pdopt_best,0.39693741007194244,3.304556354916067,-0.2157937649880096,-0.17745803357314127
+2wiki,d3_exp2_focal1,0.3802802,0.324,3.086,0.3581599,0.29,3.043,0.15215,,full,0.0,False,global,,pdopt_best,0.5940535,1.822,-0.23589360000000004,1.221

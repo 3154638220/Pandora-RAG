@@ -1,0 +1,430 @@
+\documentclass{article}
+
+% NeurIPS submission style. Keep the default option for double-blind review.
+\usepackage{neurips_2026}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{array}
+
+\title{Pandora-RAG: Adaptive Stopping for Multi-Hop Retrieval with Anytime-Valid Risk Monitoring}
+
+\author{Anonymous Authors}
+
+\newcommand{\method}{Pandora-RAG}
+\newcommand{\hotpot}{HotpotQA}
+\newcommand{\musique}{MuSiQue}
+\newcommand{\twowiki}{2WikiMultiHopQA}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Iterative multi-hop retrieval can reveal bridge evidence for complex question answering, but every additional retrieval step adds latency and may introduce distractors. We study when a RAG system should stop retrieving. \method{} formulates iterative retrieval as a fixed-order finite-horizon optimal stopping problem, derives a Bellman oracle from fully rolled-out trajectories, and uses the oracle both as a structural upper bound and as supervision for stop/continue decisions. Because oracle answer quality is unobservable at deployment time, \method{} trains a lightweight neural probe from LLM hidden states and observable retrieval features, then selects cost-aware per-step stopping thresholds on development data. To make the resulting adaptive stopping stream monitorable, \method{} attaches an outcome-aware E-value process that provides anytime-valid evidence against a low-error-rate null without claiming hard empirical error-rate control. On \hotpot{}, \musique{}, and \twowiki{}, the probe recovers 79.9--85.4\% of oracle F1 while using 1.73--3.31 retrieval steps on average, far below full-depth retrieval. Adding the E-value monitor changes average retrieval depth by only 0.5--6.4\% relative to the probe and preserves or improves F1 on two of three datasets. Under an aligned online threshold sweep, \method{} attains higher F1 and EM than Stop-RAG with fewer retrieval steps on all three benchmarks.
+\end{abstract}
+
+\section{Introduction}
+
+Iterative multi-hop retrieval-augmented generation (RAG) systems face a deployment dilemma: each additional retrieval step can uncover bridge evidence and improve reasoning, but it also incurs latency, model calls, and context-processing cost. The marginal value of another retrieval is highly query-dependent. Some questions are answered after the first piece of evidence; others require several hops before a decisive document appears; still others degrade when the system continues retrieving distractors. A fixed retrieval depth therefore bakes a global cost-quality compromise into every query, even though the decision to continue is inherently instance-specific.
+
+This paper studies multi-hop RAG through the lens of adaptive stopping. The core question is not only what to retrieve, but when the system should stop retrieving and commit to an answer. This view exposes three gaps in current practice. First, many iterative RAG pipelines use fixed depths or heuristic triggers, leaving the sequential structure of the stopping problem underused. Second, the true answer quality is not observable at deployment time, so an effective stopping rule must infer continuation value from the current state. Third, once the stopping time depends on model outputs, the evaluation stream is no longer a passive fixed-depth procedure; deployment needs an online risk signal that remains meaningful under data-adaptive stopping.
+
+\method{} addresses these gaps with a three-layer design. A fixed-order optimal-stopping oracle provides a structural upper bound and step-level stop/continue labels from fully rolled-out trajectories. A neural probe then learns a deployable stopping signal from LLM hidden states and observable shallow features. Finally, an E-value monitor tracks online risk evidence for the stopped answers. The monitor is not claimed to force the empirical error rate below a target level; rather, it provides anytime-valid evidence against a low-error-rate null and can be used as a low-overhead alarm or abstention trigger.
+
+Our contributions are threefold. First, we formulate iterative multi-hop RAG stopping as a fixed-order sequential information-acquisition problem and use a Bellman oracle as both an upper bound and a source of supervision. Second, we train a deployable stopping probe and audit a Lite variant with normalized cost accounting, separating retrieval/generation cost from stopping-feature overhead. Third, we attach an E-value process to the adaptively stopped stream, yielding an online risk-evidence trace that can respond to degraded test streams.
+
+The resulting empirical picture is deliberately cost-aware. On three multi-hop QA benchmarks, the learned probe recovers 79.9--85.4\% of the oracle F1 while operating at substantially lower retrieval depth than full fixed-depth retrieval. The probe does not uniformly dominate the best fixed depth on every dataset; instead, it occupies a strong low-cost point on the quality-budget frontier. Adding the E-value monitor changes this point only slightly: at $\gamma=0.5$ and $\alpha=0.1$, Probe+E-value increases average retrieval depth by about 0.5--6.4\% relative to Probe, while preserving or slightly improving F1 on two of the three datasets. In contrast, a split conformal-prediction (CP) gate often spends far more retrieval budget and is dataset-sensitive. Under an aligned online threshold sweep, Stop-RAG improves over its original operating point on some datasets, but its Pareto frontier remains below \method{} Probe+E-value in F1/EM versus average retrieval depth.
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Fixed-order stopping for iterative RAG}
+\label{sec:problem}
+
+For a question $q$, an iterative RAG system produces a fixed-order sequence of retrieval states
+\[
+  s_k=(q,d_{1:k},a_k,\phi_k), \qquad k=1,\ldots,K,
+\]
+where $d_{1:k}$ are the documents retrieved so far, $a_k$ is the current answer, and $\phi_k$ denotes observable step features such as retrieval scores, answer-confidence proxies, answer-change features, and cost logs. Let $\mathcal{F}_k=\sigma(s_1,\ldots,s_k)$ be the information available after step $k$. A stopping policy chooses a stopping time $\tau\in\{1,\ldots,K\}$ with respect to this filtration and returns $a_\tau$.
+
+Let $Q(s_k)\in[0,1]$ denote the answer quality at step $k$; in experiments we use token-level F1 for the stopping oracle and also report exact match. Let $c_k\ge 0$ be the cost of executing retrieval/generation step $k$. The cost-quality objective is
+\begin{equation}
+  J(\pi)
+  =
+  \mathbb{E}_{\pi}\left[
+    Q(s_{\tau_\pi})-\sum_{j=1}^{\tau_\pi}c_j
+  \right].
+  \label{eq:utility}
+\end{equation}
+This formulation separates the decision problem from the retrieval order: the retriever and generator define the ordered trajectory, while \method{} learns when to stop along that trajectory. The main experiments use a fixed per-step oracle cost and report average retrieval steps as the primary cost metric; the implementation also supports token- and latency-weighted costs.
+
+\subsection{Bellman oracle and supervision}
+\label{sec:bellman-oracle}
+
+In the population problem, finite-horizon optimal stopping admits the Bellman recursion
+\begin{align}
+  V_K^*(s_K) &= Q(s_K), \\
+  V_k^*(s_k) &=
+  \max\left\{
+    Q(s_k),
+    \mathbb{E}\left[V_{k+1}^*(s_{k+1})\mid\mathcal{F}_k\right]-c_{k+1}
+  \right\},
+  \qquad k<K .
+  \label{eq:bellman}
+\end{align}
+The optimal action compares the value of stopping now with the continuation value. Defining
+\[
+  \Delta_k^*(s_k)=
+  \mathbb{E}\left[V_{k+1}^*(s_{k+1})\mid\mathcal{F}_k\right]
+  -c_{k+1}-Q(s_k),
+\]
+the oracle continues when $\Delta_k^*(s_k)>0$ and stops otherwise. This is the fixed-order structure that motivates the name \method{}: as in Pandora-style search, the system asks whether opening one more information source is worth its cost. Unlike the classical independent-box setting, however, multi-hop retrieval is state-dependent because the next retrieval distribution depends on the evidence already found. Our deployable method therefore relies on the Bellman fixed-order recursion rather than claiming to learn exact Weitzman reservation values.
+
+Stage 1 constructs a trajectory-level oracle by forcing each example to run to $K$ and then performing backward dynamic programming on the realized qualities. For example $i$, let $Q_k^i=Q(s_k^i)$ and $c_k^i$ be the observed quality and cost at step $k$. We compute
+\begin{equation}
+  \widetilde V_K^i=Q_K^i,\qquad
+  \widetilde V_k^i=\max\left\{Q_k^i,\widetilde V_{k+1}^i-c_{k+1}^i\right\}.
+  \label{eq:trajectory-dp}
+\end{equation}
+The oracle stops at the first $k$ such that
+\[
+  Q_k^i \ge \widetilde V_{k+1}^i-c_{k+1}^i,
+\]
+or at $K$ if no earlier step satisfies the inequality. It also provides step-level training labels
+\begin{equation}
+  m_k^i=(\widetilde V_{k+1}^i-c_{k+1}^i)-Q_k^i,
+  \qquad
+  y_k^i=\mathbb{I}\{m_k^i>0\},
+  \label{eq:oracle-labels}
+\end{equation}
+where $m_k^i$ is the continuation margin and $y_k^i=1$ denotes \textsc{Continue}. This oracle is not deployable because it uses future realized answer quality, but it serves two roles: it gives an upper bound for the chosen RAG trajectory and supplies supervision for a deployable stopping signal.
+
+\subsection{Neural stopping probe}
+\label{sec:probe}
+
+At deployment time, neither $Q(s_k)$ nor the future trajectory is observed. \method{} therefore learns a continuation-decision estimator from observable state representations. For each step, the probe input is
+\[
+  x_k=(h_k,\phi_k),
+\]
+where $h_k$ is the last-layer hidden representation of the generator state and $\phi_k$ is the shallow feature vector. The main probe is a two-branch MLP: a hidden branch normalizes and compresses $h_k$, a shallow branch embeds $\phi_k$, and a fusion head maps the concatenated representation to a continuation logit. A Lite variant removes higher-overhead features such as uncertainty and consistency scores, retaining hidden states, step and retrieval-score features, token/latency logs, and cheap lexical stability features for deployment-cost auditing.
+
+The probe predicts
+\begin{equation}
+  p_\theta(k)=\Pr_\theta(y_k=1\mid x_k),
+  \label{eq:probe-prob}
+\end{equation}
+where $y_k$ is the oracle continuation label from Eq.~\eqref{eq:oracle-labels}. We train with focal binary cross-entropy, label smoothing, dropout, weight decay, and early stopping. Abstractly, the objective is
+\begin{equation}
+  \mathcal{L}_{\mathrm{probe}}(\theta)
+  =
+  \mathbb{E}\left[
+    w_k\,
+    \ell_{\mathrm{focal}}\left(p_\theta(k),y_k\right)
+  \right],
+  \label{eq:probe-loss}
+\end{equation}
+where $w_k$ can emphasize high-margin oracle decisions. We use binary continuation labels as the main supervision because F1-regression heads were consistently weaker in policy evaluation.
+
+The deployed stopping rule uses per-step thresholds $\eta_k$:
+\begin{equation}
+  \hat a_k=
+  \begin{cases}
+    \textsc{Continue}, & p_\theta(k)\ge \eta_k \text{ and } k<K,\\
+    \textsc{Stop}, & p_\theta(k)<\eta_k \text{ or } k=K .
+  \end{cases}
+  \label{eq:probe-policy}
+\end{equation}
+Thresholds are selected on the development split. Candidate policies must stay within a development-step budget tied to the Global-Weitzman structural baseline; among feasible policies we maximize a cost-aware utility of the form $\mathrm{F1}-\lambda\cdot\mathrm{normalized\ cost}$. A conservative per-step refinement is accepted only if it improves the development utility, matched-budget F1, or the Pareto frontier. This makes the reported probe a budget-aware operating point, not a pure max-F1 classifier.
+
+\subsection{E-value risk monitor}
+\label{sec:evalue-method}
+
+The learned probe is still an imperfect adaptive stopper. \method{} therefore adds a monitoring layer over the stream of stopped answers. Fix a quality threshold $\gamma$ and nominal error level $\alpha$. For the $n$th deployment example, after the policy stops at $\tau_n$, define
+\[
+  e_n=\mathbb{I}\{Q(s_{\tau_n})<\gamma\}.
+\]
+The monitor tests the low-risk null
+\begin{equation}
+  H_0:\quad
+  \mathbb{E}[e_n\mid\mathcal{G}_{n-1}]\le \alpha
+  \quad\text{for all }n,
+  \label{eq:low-risk-null}
+\end{equation}
+where $\mathcal{G}_{n-1}$ is the pre-outcome information available before $e_n$ is revealed, including previous examples and the current candidate-stop features. This null is about the adaptively stopped system as deployed; it is not an assumption that the test stream is i.i.d.
+
+Before updating the E-process, we train a light quality model on the calibration split,
+\[
+  \hat p_n
+  =
+  \Pr_\psi\!\left(Q(s_{\tau_n})\ge\gamma
+  \mid z_{\tau_n},p_\theta(\tau_n)\right),
+\]
+where $z_{\tau_n}$ contains shallow quality features and the probe continuation probability. In the current implementation, this model is a standardized logistic regression with class-balanced loss. A calibration quantile defines a quality bar: when the probe proposes stopping at a candidate step whose $\hat p$ falls below the bar, the monitored policy delays stopping when possible. The same quality estimate also sets a predictable betting fraction
+\[
+  \lambda_n=\operatorname{clip}(1-\hat p_n,\epsilon,1-\epsilon).
+\]
+The outcome-aware E-value update is
+\begin{equation}
+  E_0=1,\qquad
+  E_n=E_{n-1}\left(1-\lambda_n+\lambda_n\frac{e_n}{\alpha}\right).
+  \label{eq:evalue-update}
+\end{equation}
+Because $\lambda_n$ is predictable with respect to $\mathcal{G}_{n-1}$, Eq.~\eqref{eq:low-risk-null} implies that $(E_n)$ is a nonnegative supermartingale under $H_0$. Ville's inequality gives the anytime-valid alarm guarantee
+\begin{equation}
+  \Pr_{H_0}\left(\sup_n E_n\ge 1/\delta\right)\le \delta .
+  \label{eq:ville}
+\end{equation}
+In experiments we report wealth capped at the operational boundary $1/\alpha$ and use boundary crossing as risk evidence or, in the selective-prediction variant, as a trigger for abstention. The E-value layer is a monitor rather than an optimizer: it can detect sustained risk under adaptive stopping and shift, but it does not by itself guarantee that the realized empirical error rate is below $\alpha$.
+
+\section{Experimental setup}
+\label{sec:setup}
+
+\paragraph{Tasks and splits.}
+We evaluate on three multi-hop question answering benchmarks: \hotpot{}, \musique{}, and \twowiki{}. Each dataset is split into disjoint train, calibration, development, and test partitions with seed 42. The calibration split is reserved for Stage-3 quality-model calibration, E-value and CP calibration, and betting-related thresholds. The development split is used for Stage-2 stopping-threshold selection. Test examples are used only for final evaluation.
+
+\begin{table}[t]
+  \caption{Datasets and deterministic splits. \musique{} has fewer test examples because the default quota reserves calibration and development examples from the available validation pool.}
+  \label{tab:splits}
+  \centering
+  \small
+  \begin{tabular}{llrrrrr}
+    \toprule
+    Dataset & Hop type & Train & Calib & Dev & Test & Seed \\
+    \midrule
+    \hotpot{} & 2-hop distractor QA & 4000 & 1000 & 1000 & 1000 & 42 \\
+    \musique{} & 2--4 hop QA & 4000 & 1000 & 1000 & 417 & 42 \\
+    \twowiki{} & multi-entity multi-hop QA & 4000 & 1000 & 1000 & 1000 & 42 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{RAG backbone and trajectories.}
+Each example is processed by a fixed-order iterative RAG pipeline with maximum retrieval depth $K=5$. At each step, the system records the retrieved document, retrieval score, current answer, answer F1 and exact match against the gold answer, shallow observable features, and LLM hidden states for the current cumulative state. The generator/state model is Llama-3.1-8B-Instruct with deterministic generation. The main hidden representation is the last-layer, last-token vector of dimension 4096, extracted separately for each retrieval step so that the representation is aligned with step-level stopping labels.
+
+\paragraph{Trajectory annotation.}
+Fully rolled-out trajectories are annotated with the Bellman labels in Section~\ref{sec:bellman-oracle}. The oracle uses the realized per-step F1 values and a fixed per-step cost in the main record. These labels are used only for supervision and upper-bound reporting; all deployed policies in the main comparison choose their stopping step from observable state features.
+
+\paragraph{Baselines and metrics.}
+We compare against fixed-depth retrieval for $K\in\{1,2,3,4,5\}$, a global Weitzman-style static stopping rule, an instance-level dynamic-programming oracle, the learned Probe without monitoring, Probe+E-value, Probe+CP, and an aligned online threshold sweep of Stop-RAG. Answer quality is measured by token-level F1 and exact match (EM); retrieval cost is summarized as average retrieval steps. For risk monitoring, we report error rate at threshold $\gamma$, final E-wealth, whether the E-process reaches its boundary, and selective-prediction coverage/accuracy when abstention is enabled.
+
+\section{Results}
+\label{sec:results}
+
+\subsection{Adaptive stopping gives a low-cost Pareto point}
+\label{sec:adaptive-results}
+
+Table~\ref{tab:stage2-main} shows the fixed-depth baselines, structural baselines, oracle upper bound, and the learned probe. The oracle is not deployable because it uses the realized answer quality along the full trajectory; it is included as an upper bound and as the source of supervision. The global Weitzman baseline is also structural rather than fully deployable, since it uses query-independent reservations estimated from training trajectories.
+
+\begin{table}[t]
+  \caption{Adaptive stopping results on the test set. The learned probe recovers most of the oracle benefit at low retrieval depth, but does not uniformly beat the best fixed depth on every dataset.}
+  \label{tab:stage2-main}
+  \centering
+  \small
+  \resizebox{\linewidth}{!}{
+  \begin{tabular}{lrrrrrr}
+    \toprule
+    Strategy & \multicolumn{2}{c}{\hotpot{}} & \multicolumn{2}{c}{\musique{}} & \multicolumn{2}{c}{\twowiki{}} \\
+    \cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
+    & F1 & Steps & F1 & Steps & F1 & Steps \\
+    \midrule
+    Fixed-K=1 & 0.4340 & 1.00 & 0.0797 & 1.00 & 0.2846 & 1.00 \\
+    Fixed-K=2 & 0.6773 & 2.00 & 0.1830 & 2.00 & 0.5908 & 2.00 \\
+    Fixed-K=3 & 0.6775 & 3.00 & 0.3210 & 3.00 & 0.5583 & 3.00 \\
+    Fixed-K=4 & 0.6747 & 4.00 & 0.3816 & 4.00 & 0.5382 & 4.00 \\
+    Fixed-K=5 & 0.6668 & 4.99 & 0.4022 & 5.00 & 0.5288 & 5.00 \\
+    Global-Weitzman & 0.7092 & 1.64 & 0.4229 & 3.29 & 0.6449 & 1.77 \\
+    Oracle & 0.7810 & 1.58 & 0.4966 & 2.12 & 0.6954 & 1.59 \\
+    Probe & 0.6544 & 1.73 & 0.3969 & 3.31 & 0.5941 & 1.82 \\
+    \bottomrule
+  \end{tabular}}
+\end{table}
+
+The key result is not that the learned probe always has the highest single-point F1. On \hotpot{}, the best fixed depth is $K=3$ with F1 0.6775, while Probe obtains 0.6544 at 1.73 steps. On \musique{}, Probe nearly matches the full-depth fixed baseline with 3.31 rather than 5.00 steps. On \twowiki{}, Probe slightly exceeds the best fixed depth while using fewer steps than $K=2$. Across datasets, Probe recovers 83.8\%, 79.9\%, and 85.4\% of the oracle F1 on \hotpot{}, \musique{}, and \twowiki{}, respectively. This supports the intended claim: adaptive stopping is valuable as a cost-quality tradeoff, and should be evaluated on the Pareto frontier rather than only as a max-F1 classifier.
+
+We also audit the deployment overhead of the stopping features. Table~\ref{tab:lite-cost} compares the main probe with a Lite variant that removes expensive uncertainty and consistency features while retaining hidden states, step and retrieval-score features, token/latency logs, and cheap lexical stability features. Lite preserves nearly the same cost-quality point: F1 decreases by 0.001--0.009, while feature overhead drops by about three quarters. Because retrieval and generation dominate the normalized cost model, the end-to-end cost reduction is more modest, ranging from 0.3\% to 5.7\%.
+
+\begin{table}[t]
+  \caption{Lite Probe deployment audit. Lite removes higher-overhead stopping features and preserves most of the main probe's cost-quality point. Cost deltas use normalized accounting weights: retrieval $1.0$, generation $1.0$, Full features $0.08$, Lite features $0.02$, and probe forward $0.01$ per step.}
+  \label{tab:lite-cost}
+  \centering
+  \small
+  \resizebox{\linewidth}{!}{
+  \begin{tabular}{lrrrrrr}
+    \toprule
+    Dataset & Full F1 & Full steps & Lite F1 & Lite steps & Lite/oracle F1 & Total cost $\Delta$ \\
+    \midrule
+    \hotpot{} & 0.6544 & 1.732 & 0.6531 & 1.682 & 83.6\% & -5.7\% \\
+    \musique{} & 0.3969 & 3.305 & 0.3918 & 3.391 & 78.9\% & -0.3\% \\
+    \twowiki{} & 0.5941 & 1.822 & 0.5855 & 1.829 & 84.2\% & -2.5\% \\
+    \bottomrule
+  \end{tabular}}
+\end{table}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.92\linewidth]{results/stage3_final_pareto_all.png}
+  \caption{F1 versus average retrieval steps for the oracle, structural baselines, Probe, Probe+E-value, and Probe+CP. Probe remains in the low-cost region; adding the E-value monitor produces only a small movement in average steps, whereas CP moves the system toward substantially larger retrieval budgets.}
+  \label{fig:pareto}
+\end{figure}
+
+\subsection{E-value monitoring adds little retrieval overhead}
+\label{sec:evalue-main}
+
+Table~\ref{tab:stage3-main} evaluates the risk-monitoring layer at $\gamma=0.5$ and $\alpha=0.1$ with predictive betting. Probe+E-value preserves the low-cost character of the probe: average steps increase from 1.70 to 1.81 on \hotpot{}, from 3.39 to 3.41 on \musique{}, and from 1.82 to 1.91 on \twowiki{}. F1 improves slightly on \hotpot{} and \twowiki{}, and is essentially unchanged on \musique{}. In contrast, Probe+CP is much more expensive: it raises average steps to 4.11, 4.85, and 4.32, respectively. CP is not uniformly better in quality either; it improves \hotpot{} F1 modestly but degrades \musique{} and \twowiki{}.
+
+\begin{table}[t]
+  \caption{Risk-monitoring results at $\gamma=0.5$ and $\alpha=0.1$. E-value monitoring is low-overhead; CP is substantially more expensive and dataset-sensitive.}
+  \label{tab:stage3-main}
+  \centering
+  \small
+  \resizebox{\linewidth}{!}{
+  \begin{tabular}{llrrrr}
+    \toprule
+    Dataset & Method & F1 & EM & Error rate & Steps \\
+    \midrule
+    \hotpot{} & Probe & 0.6569 & 0.5190 & 0.3030 & 1.70 \\
+    \hotpot{} & Probe+E-value & 0.6654 & 0.5290 & 0.2950 & 1.81 \\
+    \hotpot{} & Probe+CP & 0.6716 & 0.5310 & 0.2960 & 4.11 \\
+    \midrule
+    \musique{} & Probe & 0.4152 & 0.3189 & 0.5803 & 3.39 \\
+    \musique{} & Probe+E-value & 0.4127 & 0.3141 & 0.5827 & 3.41 \\
+    \musique{} & Probe+CP & 0.4015 & 0.3046 & 0.5971 & 4.85 \\
+    \midrule
+    \twowiki{} & Probe & 0.5639 & 0.4740 & 0.4090 & 1.82 \\
+    \twowiki{} & Probe+E-value & 0.5728 & 0.4810 & 0.4010 & 1.91 \\
+    \twowiki{} & Probe+CP & 0.5383 & 0.4340 & 0.4370 & 4.32 \\
+    \bottomrule
+  \end{tabular}}
+\end{table}
+
+The E-wealth traces should be interpreted as online risk evidence, not as a mechanism that enforces the empirical error rate below $\alpha$. Let $e_t=\mathbf{1}\{\mathrm{F1}_t<\gamma\}$ be the error indicator for the stopped answer at time $t$. The monitor tests the low-risk null
+\[
+H_0:\mathbb{E}[e_t\mid \mathcal{G}_{t-1}]\le \alpha,
+\]
+using predictable betting fractions $\lambda_t$ and the E-process
+\[
+E_n=\prod_{t=1}^{n}\left(1-\lambda_t+\lambda_t e_t/\alpha\right),
+\qquad
+\Pr_{H_0}\left(\sup_n E_n\ge 1/\delta\right)\le \delta.
+\]
+Under the no-shift main evaluation at $\alpha=0.1$, final E-wealth is 0.014 on \hotpot{}, 4.193 on \musique{}, and 10.000 on \twowiki{} with reported wealth capped at $1/\alpha=10$. Thus \twowiki{} reaches the alarm boundary, \musique{} accumulates risk evidence without reaching the cap, and \hotpot{} behaves more like a low-cost quality gate in this configuration.
+
+\subsection{Risk evidence responds to degraded streams}
+\label{sec:shift}
+
+We further evaluate test-time streams with sudden, gradual, and periodic distribution shifts. These shifts reorder the test stream so that harder examples become concentrated or repeated later in the sequence. The stable finding is that E-value wealth is sensitive to clearly degraded streams, especially for \musique{} and \twowiki{}. Under sudden shift, all three datasets reach the cap at $\alpha=0.1$; at $\alpha=0.2$, \musique{} and \twowiki{} still trigger reliably, while \hotpot{} is more dependent on the precise shift path. Under gradual and periodic shifts, \musique{} and \twowiki{} again show strong responses across $\alpha\in\{0.1,0.2\}$, whereas \hotpot{} responds mainly at $\alpha=0.1$.
+
+This behavior is the intended role of the monitor. The E-process gives an online trajectory of risk evidence for the adaptively stopped system. A fixed CP threshold, by contrast, is calibrated before deployment and does not itself create a sequential alarm that reacts to a changing test stream.
+
+\subsection{Selective prediction after detection}
+\label{sec:selective}
+
+The monitor can also be used as a deployment intervention. In a simple selective-prediction rule, the system abstains on a sample if the current wealth before that sample has already reached $1/\alpha$; otherwise, it answers normally. Table~\ref{tab:selective} reports the resulting coverage and selective accuracy for $\gamma=0.5$.
+
+\begin{table}[t]
+  \caption{Selective prediction using the E-wealth boundary. Coverage is the fraction of examples answered; selective accuracy is the fraction of answered examples with F1 at least $\gamma=0.5$.}
+  \label{tab:selective}
+  \centering
+  \small
+  \begin{tabular}{lrrr}
+    \toprule
+    Dataset & $\alpha$ & Coverage & Selective accuracy \\
+    \midrule
+    \hotpot{} & 0.1 & 0.931 & 0.705 \\
+    \hotpot{} & 0.2 & 1.000 & 0.725 \\
+    \musique{} & 0.1 & 0.444 & 0.373 \\
+    \musique{} & 0.2 & 0.494 & 0.379 \\
+    \twowiki{} & 0.1 & 0.706 & 0.581 \\
+    \twowiki{} & 0.2 & 0.853 & 0.600 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The coverage pattern is informative. \hotpot{} remains mostly covered, consistent with its low no-shift wealth in the main setting. \musique{} has much lower coverage, reflecting its high-risk stream and high empirical error rate. This is a limitation as well as a feature: abstention improves deployment caution only by refusing to answer more often when the monitor sees sustained risk.
+
+\subsection{Aligned online comparison with Stop-RAG}
+\label{sec:stoprag}
+
+We reproduce Stop-RAG under the same test split and sample IDs, and evaluate it with true online stopping. To avoid relying on a single threshold, we sweep ten online stopping thresholds for a fixed Stop-RAG checkpoint on each dataset. Table~\ref{tab:stoprag} reports the best-F1 point on the resulting Stop-RAG frontier against \method{} Probe+E-value.
+
+\begin{table}[t]
+  \caption{Aligned online Stop-RAG threshold sweep. We report the best-F1 Stop-RAG frontier point for each dataset. \method{} attains higher F1 and EM with fewer retrieval steps on all three datasets.}
+  \label{tab:stoprag}
+  \centering
+  \small
+  \resizebox{\linewidth}{!}{
+  \begin{tabular}{lrrrrrrr}
+    \toprule
+    Dataset & Stop-RAG threshold & \multicolumn{3}{c}{Stop-RAG} & \multicolumn{3}{c}{\method{} Probe+E-value} \\
+    \cmidrule(lr){3-5}\cmidrule(lr){6-8}
+    & & F1 & EM & Steps & F1 & EM & Steps \\
+    \midrule
+    \hotpot{} & -0.03 & 0.6100 & 0.4750 & 5.000 & 0.6654 & 0.5290 & 1.807 \\
+    \musique{} & -0.03 & 0.2731 & 0.2038 & 4.571 & 0.4127 & 0.3141 & 3.410 \\
+    \twowiki{} & -0.06 & 0.5552 & 0.4720 & 2.536 & 0.5728 & 0.4810 & 1.905 \\
+    \midrule
+    Macro average & -- & 0.4794 & 0.3836 & 4.036 & 0.5503 & 0.4414 & 2.374 \\
+    \bottomrule
+  \end{tabular}}
+\end{table}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.32\linewidth]{results/stop_rag_pareto_hotpotqa.png}
+  \includegraphics[width=0.32\linewidth]{results/stop_rag_pareto_musique.png}
+  \includegraphics[width=0.32\linewidth]{results/stop_rag_pareto_2wiki.png}
+  \caption{Aligned online Stop-RAG threshold-sweep frontiers on \hotpot{}, \musique{}, and \twowiki{}. The sweep makes Stop-RAG a Pareto baseline rather than a single-threshold comparison; \method{} Probe+E-value remains above the swept frontier on all three datasets.}
+  \label{fig:stoprag}
+\end{figure}
+
+Threshold tuning improves Stop-RAG over its original aligned single point, especially on \twowiki{}, but the frontier remains below \method{} in the F1/EM versus steps plane. At matched budget, Stop-RAG obtains 0.4110 F1 on \hotpot{} at 1.00 steps and 0.2397 F1 on \musique{} at 3.20 steps; on \twowiki{}, its cheapest frontier point already costs slightly more than \method{} and remains lower quality (0.5286 F1 at 1.958 steps). No swept Stop-RAG point reaches the corresponding \method{} F1. This comparison is still a fixed-checkpoint threshold sweep rather than a Stop-RAG retraining or checkpoint sweep, but it addresses the main concern that the earlier comparison used a poorly chosen threshold.
+
+\section{Ablations and robustness}
+\label{sec:ablations}
+
+\paragraph{Operating-point selection matters.}
+The main probe uses a cost-aware operating point selected on the development split. A quality-first appendix point, selected by pure development F1, reaches 0.6884 F1 at 2.981 steps on \hotpot{} and 0.4140 F1 at 4.192 steps on \musique{}, compared with the main points of 0.6544 at 1.732 steps and 0.3969 at 3.305 steps. On \twowiki{}, the same quality-first rule reaches 0.5918 F1 at 2.629 steps, slightly below the cost-aware main point of 0.5941 at 1.822 steps. This confirms that operating-point choice matters, but also that pure max-F1 selection is not uniformly better. We keep the cost-aware point as the main result because the paper's objective is adaptive stopping under retrieval budget, not unconstrained max-F1 selection.
+
+\paragraph{Binary stopping labels are more reliable than F1 regression.}
+Across all three datasets, training the probe as a binary continue/stop classifier outperforms an F1 regression head by roughly 0.05--0.07 F1 in the stopping policy. This supports the main framing of the deployed component as a learned stopping signal or continuation-decision estimator rather than an exact reservation-value regressor.
+
+\paragraph{More shallow features did not improve the main point.}
+We retrained with a 31-dimensional shallow feature set. Relative to the main 20-feature checkpoint, the expanded feature set changed \hotpot{} from 0.6544/1.732 to 0.6530/1.706, \musique{} from 0.3969/3.305 to 0.3934/3.410, and \twowiki{} from 0.5941/1.822 to 0.5725/1.801. Since this did not improve any main operating point and degraded \twowiki{}, we treat it as a diagnostic negative result rather than the final model.
+
+\paragraph{Capacity and sequence-history ablations were not the bottleneck.}
+Increasing hidden compression to 512, adding sequence-history features, using a GRU sequence probe, replacing last-token hidden states with mean pooling, or blending last and mean pooling did not provide stable gains. The most consistent gains came from dataset-specific choices such as margin filtering and residual hidden branches, indicating that the bottleneck is the information exposed by the state representation and labels rather than simply model size.
+
+\paragraph{Shared configurations are substantially weaker.}
+To audit per-dataset tuning sensitivity, we select a strict shared Stage-2 configuration on macro development F1 and evaluate it without using test labels for selection. The best shared default obtains 0.3551 macro F1 at 3.056 steps, compared with 0.5485 macro F1 at 2.286 steps for the dev-selected per-dataset operating points. Source-selected transfer across datasets is similarly weak. We therefore report the main \method{} policies as per-dataset development-selected stoppers and treat shared-configuration transfer as a limitation rather than as positive robustness evidence.
+
+\paragraph{E-value robustness over $\gamma$ and $\alpha$.}
+The predictive betting variant was evaluated over $4$ values of $\gamma$, $4$ values of $\alpha$, and $3$ datasets, for 48 configurations. All 48 configurations satisfy the acceptance checks that Probe+E-value uses at most $1.3\times$ the Probe steps and preserves at least 97\% of the Probe F1. At $\alpha=0.1$, average step increases are 6.28\% on \hotpot{}, 0.48\% on \musique{}, and 4.69\% on \twowiki{}. Predictive betting is mildly stronger than fixed betting in final wealth, especially on \musique{}, but the difference should be interpreted as a robust default rather than a large standalone gain.
+
+\paragraph{Statistical uncertainty is dataset-dependent.}
+Paired bootstrap intervals for the main Stage-3 operating point show that Probe+E-value improves over Probe by 0.0089 F1 on \twowiki{} with a 95\% interval of $[0.0017,0.0165]$ and paired $p=0.0159$. On \hotpot{}, the corresponding gain is 0.0085 F1 with a 95\% interval of $[-0.0003,0.0176]$, while \musique{} shows a small, statistically indistinguishable change of -0.0026 F1 with a wider interval of $[-0.0088,0.0020]$. We therefore interpret \musique{} as a small-test, high-error stress case rather than as evidence of significant quality improvement from the monitor.
+
+\section{Limitations}
+\label{sec:limitations}
+
+First, the probe is not an optimal deployed policy. The Bellman oracle gives an instance-level upper bound and supervision from fully observed trajectories, while the deployed probe only approximates the induced stopping decisions from observable features. Second, the E-value monitor detects elevated risk; it does not guarantee that the system's realized error rate is below $\alpha$, nor does it repair low-quality answers by itself. Third, the Stop-RAG comparison is an aligned online threshold sweep for fixed checkpoints, not a full Stop-RAG retraining or checkpoint sweep. Fourth, the strongest Stage-2 results rely on per-dataset development-selected operating points; strict shared-configuration and source-transfer audits are substantially weaker. Fifth, the current main results use a fixed maximum depth $K=5$, a fixed RAG backbone, and a fixed-cost main objective; token- or latency-weighted costs may change the preferred operating point. A small-scale retriever diagnostic suggests that oracle stopping headroom exists beyond the default retriever, but it does not replace a full cross-backbone evaluation. Finally, \musique{} remains a difficult high-error setting: the monitor correctly identifies sustained risk, but selective prediction reaches that caution by abstaining on a large fraction of examples.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+\method{} reframes iterative multi-hop RAG as an adaptive stopping problem. The empirical evidence supports a restrained but useful conclusion: a learned stopping signal can recover most of the oracle stopping benefit at low retrieval depth, a Lite variant can preserve the main cost-quality point with cleaner feature overhead, and an E-value monitor can add anytime-valid online risk evidence with little extra retrieval cost. This combination does not make the deployed policy provably optimal, and it does not force empirical error below a target threshold. It does, however, turn stopping from a fixed global depth into an instance-adaptive, monitorable decision, and it remains competitive against an aligned online Stop-RAG threshold sweep.
+
+% TODO: Add Related Work after citation audit.
+% TODO: Add bibliography once citation keys are settled.
+% TODO: Add NeurIPS checklist when checklist.tex is available.
+
+\end{document}

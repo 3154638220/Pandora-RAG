@@ -1,0 +1,4 @@
+dataset,pandora_f1,pandora_em,pandora_steps,stop_rag_best_f1_at_pandora_budget,stop_rag_best_em_at_pandora_budget,stop_rag_steps_at_budget_match,stop_rag_threshold_at_budget_match,stop_rag_steps_to_reach_pandora_f1,stop_rag_threshold_to_reach_pandora_f1
+2wikimultihopqa,0.5728125,0.481,1.905,,,,,,
+hotpotqa,0.6653776,0.529,1.807,0.4110214734972629,0.308,1.0,-0.12,,
+musique,0.41265371702637893,0.31414868105515587,3.4100719424460433,0.23970030024882144,0.17266187050359713,3.2038369304556356,-0.2,,
