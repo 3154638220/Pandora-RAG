@@ -2043,6 +2043,100 @@ def _simulate_probe_policy_from_probs(
     return rows
 
 
+def _simulate_probe_policy_low_margin_conservative(
+    trajectories: List[Dict[str, Any]],
+    threshold: ThresholdSpec,
+    cfg: Stage2Config,
+    precomputed_probs: Dict[Tuple[str, int], float],
+    oracle_rows: List[Dict[str, Any]],
+    *,
+    margin_abs_lt: float = 0.1,
+    threshold_boost: float = 0.1,
+    probe_conf_half_width: float = 0.1,
+    use_oracle_margin: bool = True,
+    use_probe_low_conf: bool = True,
+    max_effective_threshold: float = 0.99,
+) -> List[Dict[str, Any]]:
+    """
+    逐步 Continue 决策：在 Oracle |m_k| 小（模糊）或 Probe p≈0.5（低置信）时，将阈值提高 Δ，使继续更保守。
+
+    oracle_rows 须与 trajectories 同序；每行含 compute_trajectory_oracle 的 step_targets[k]["margin"]。
+    """
+    if len(oracle_rows) != len(trajectories):
+        raise ValueError("oracle_rows 与 trajectories 长度不一致")
+
+    boost = float(threshold_boost)
+    mcut = float(margin_abs_lt)
+    phw = float(probe_conf_half_width)
+    cap_t = float(max_effective_threshold)
+
+    rows: List[Dict[str, Any]] = []
+    for traj, orow in zip(trajectories, oracle_rows):
+        sample_id = str(traj.get("id", ""))
+        steps = sorted(traj.get("steps") or [], key=lambda s: int(s.get("step", 0)))
+        step_targets: Dict[int, Any] = orow.get("step_targets") or {}
+
+        if not steps:
+            rows.append({"f1": 0.0, "em": 0, "steps_used": 0, "avg_cost": 0.0})
+            continue
+
+        chosen = steps[-1]
+        for step in steps:
+            k = int(step.get("step", 0))
+            if k >= cfg.max_k:
+                chosen = step
+                break
+
+            p_continue = precomputed_probs.get((sample_id, k))
+            if p_continue is None:
+                continue
+
+            base_t = (
+                float(threshold.get(k, 0.5))
+                if isinstance(threshold, dict)
+                else float(threshold)
+            )
+            tinfo = step_targets.get(k)
+            margin_v: Optional[float] = None
+            if isinstance(tinfo, dict):
+                margin_v = float(tinfo.get("margin", 0.0))
+
+            low_m = bool(
+                use_oracle_margin
+                and margin_v is not None
+                and abs(margin_v) < mcut - 1e-15
+            )
+            low_c = bool(
+                use_probe_low_conf
+                and abs(float(p_continue) - 0.5) < phw - 1e-15
+            )
+            eff_t = base_t
+            if low_m or low_c:
+                eff_t = min(cap_t, base_t + boost)
+
+            if float(p_continue) < eff_t:
+                chosen = step
+                break
+
+        used = int(chosen.get("step", len(steps)))
+        cum_cost = trajectory_cumulative_cost(
+            traj,
+            used,
+            cfg.cost_per_step,
+            cfg.max_k,
+            cfg.oracle_cost_metric,
+        )
+        rows.append(
+            {
+                "f1": float(chosen.get("f1", 0.0)),
+                "em": int(bool(chosen.get("em", False))),
+                "steps_used": used,
+                "avg_cost": float(cum_cost),
+            }
+        )
+    return rows
+
+
 def _simulate_probe_policy(
     trajectories: List[Dict[str, Any]],
     step_feature_map: Dict[Tuple[str, int], np.ndarray],

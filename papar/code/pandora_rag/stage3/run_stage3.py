@@ -454,6 +454,7 @@ def _run_one_gamma(
             },
             "plot_error_rate": str(png_err),
             "plot_wealth_trace": str(png_wealth),
+            "cumulative_error_curves": {k: [float(x) for x in v] for k, v in curves.items()},
             "post_cap_interventions": post_cap_interventions_block,
         }
 

@@ -6,10 +6,12 @@
 
 **已完成**（2026-04-20）：已在 HotpotQA 小规模配额上完成 `bm25` 与 `contriever_bge` 对照，并生成汇总表 `results/p2_backbone_retriever_sanity.csv`。
 
-| dataset | retriever | Oracle F1 | Oracle avg steps | best Fixed-K F1 | best K | Oracle gain |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| hotpotqa | bm25 | 0.7390 | 1.77 | 0.6133 | 5 | +0.1257 |
-| hotpotqa | contriever_bge | 0.7642 | 1.58 | 0.6760 | 4 | +0.0882 |
+
+| dataset  | retriever      | Oracle F1 | Oracle avg steps | best Fixed-K F1 | best K | Oracle gain |
+| -------- | -------------- | --------- | ---------------- | --------------- | ------ | ----------- |
+| hotpotqa | bm25           | 0.7390    | 1.77             | 0.6133          | 5      | +0.1257     |
+| hotpotqa | contriever_bge | 0.7642    | 1.58             | 0.6760          | 4      | +0.0882     |
+
 
 结论：两种检索后端下，Oracle 相对各自 best Fixed-K 都保留正增益，说明 adaptive stopping 的 headroom 并非 BM25-only artifact。由于检索器会改变证据分布，表中绝对 F1 **不**应被写成跨检索器强弱比较；它只支持「跨 retriever 仍存在停止策略可利用空间」这一 small-scale diagnostic 结论。
 

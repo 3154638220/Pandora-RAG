@@ -59,7 +59,7 @@ from datasets import Dataset, load_dataset
 from tqdm import tqdm
 
 from pretest.utils.llm_client import LLMClient
-from pretest.utils.metrics import compute_metrics
+from qa_shared.metrics import build_gold_answers, compute_metrics_multi
 from pretest.utils.retriever import BM25Retriever, ContrieverBgeRetriever
 from pretest.utils.weitzman import (
     compute_all_reservation_values,
@@ -493,7 +493,7 @@ def _extract_hop_count(example: Dict[str, Any], dataset_name: str, record_id: st
 
 def _normalize_record(example: Dict[str, Any], dataset_name: str, split: str, idx: int) -> Dict[str, Any]:
     q = _normalize_text(example.get("question") or example.get("query") or example.get("input"))
-    a = _normalize_text(example.get("answer") or example.get("answers") or example.get("output"))
+    gold_answers = build_gold_answers(example)
     record_id = _normalize_text(example.get("id") or example.get("_id")) or f"{dataset_name}_{split}_{idx:07d}"
     gt_hop_count = _extract_hop_count(example, dataset_name, record_id)
     return {
@@ -501,7 +501,9 @@ def _normalize_record(example: Dict[str, Any], dataset_name: str, split: str, id
         "dataset": dataset_name,
         "split": split,
         "question": q,
-        "answer": a,
+        "answer": gold_answers[0],
+        "answer_aliases": gold_answers[1:],
+        "gold_answers": gold_answers,
         "gt_hop_count": int(gt_hop_count),
         "supporting_facts": example.get("supporting_facts", None),
         "documents": _to_docs_from_raw(example),
@@ -814,7 +816,10 @@ def collect_trajectories(
         """处理单条轨迹，返回 (traj_dict, [(feat_path, emb_last, emb_mean)])；失败返回 None。"""
         try:
             q = row["question"]
-            gold = row["answer"]
+            gold_answers = row.get("gold_answers")
+            if not gold_answers:
+                gold_answers = [row.get("answer") or ""]
+            gold = gold_answers[0]
             docs_pool = row.get("documents", []) or [q]
 
             # 预编码段落向量（无状态，每个 item 独立，加锁防止 CUDA 并发）
@@ -869,7 +874,7 @@ def collect_trajectories(
                 # ── LLM 生成（HTTP，无需锁）─────────────────────
                 samples, gen_meta = llm.generate_n(q, acc_context, cfg.n_samples, cfg.temperature)
                 current_answer = _normalize_text(samples[0]) if samples else ""
-                f1, em = compute_metrics(current_answer, gold)
+                f1, em = compute_metrics_multi(current_answer, gold_answers)
 
                 semantic_entropy, self_consistency = _semantic_entropy_and_consistency(samples)
                 overlap = _jaccard(doc, " ".join(hist_docs[:-1])) if len(hist_docs) > 1 else 0.0
@@ -930,6 +935,8 @@ def collect_trajectories(
                 "split": split,
                 "question": q,
                 "gold_answer": gold,
+                "answer_aliases": gold_answers[1:],
+                "gold_answers": list(gold_answers),
                 "gt_hop_count": int(row.get("gt_hop_count", -1)),
                 "steps": steps,
             }

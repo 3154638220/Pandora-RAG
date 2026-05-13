@@ -264,9 +264,9 @@ Full rollout trajectories
 
 ### P1. 统计显著性放进主文或 appendix
 
-已有 `scripts/stage3_significance.py` 和 `docs/stage3_significance_report.md`。中稿需要至少引用一次这些结果。
+已有 `scripts/stage3_significance.py`。仓库根目录的 `docs/stage3_significance_report.md` 对应默认 `pdopt_best` probe；**主文若采用 alias-metric–aligned checkpoint**，显著性与原始表应在 `paper/docs/stage3_significance_report_alias_metric_aligned.md`（数值亦在 `paper/results/stage3_significance_*_alias_metric_aligned.{csv,json}`）。中稿需要至少引用一次与主表设定一致的那份结果。
 
-主文可写短句：
+主文可写短句（数字请对照你实际引用的那份报告；以下为 **pdopt_best** 报告中的 2Wiki 表述示例）：
 
 > Paired bootstrap intervals show that Probe+E-value improves Probe on 2Wiki by 0.0089 F1 with 95% CI [0.0017, 0.0165], is borderline on HotpotQA, and is statistically indistinguishable on MuSiQue.
 

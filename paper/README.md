@@ -11,7 +11,8 @@ long run logs.
 - `source/Nips-suggestion.md`: writing and positioning suggestions.
 - `docs/stage3_results_summary.md`: concise Stage 3 result summary.
 - `docs/stage3_narrative.md`: narrative text for the final stage.
-- `docs/stage3_significance_report.md`: significance testing notes.
+- `docs/stage3_significance_report.md`: significance testing notes (default `pdopt_best` probes).
+- `docs/stage3_significance_report_alias_metric_aligned.md`: same tests for alias-metric–aligned main-text checkpoints (`--artifact-suffix alias_metric_aligned`).
 - `docs/stage2_final.md`: Stage 2 final report.
 - `docs/stage1_report.md`: Stage 1 report.
 - `docs/成果总结.md`: Chinese summary of the overall work.

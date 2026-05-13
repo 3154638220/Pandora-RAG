@@ -31,11 +31,13 @@ PPO 不应进入标题、摘要或贡献列表；若后续保留，只适合放 
 
 > Probe recovers 79.9% to 85.4% of the oracle F1 while operating at much lower retrieval depth than fixed full-depth retrieval; however, it does not uniformly beat the best fixed depth on every dataset.
 
-| 数据集 | Probe F1 / steps | Oracle F1 / steps | Probe / Oracle | Best Fixed-K | Probe vs Best Fixed |
-| --- | ---: | ---: | ---: | --- | ---: |
-| HotpotQA | 0.6544 / 1.73 | 0.7810 / 1.58 | 83.8% | `K=3`, 0.6775 | -0.0231 |
-| MuSiQue | 0.3969 / 3.31 | 0.4966 / 2.12 | 79.9% | `K=5`, 0.4022 | -0.0053 |
-| 2Wiki | 0.5941 / 1.82 | 0.6954 / 1.59 | 85.4% | `K=2`, 0.5908 | +0.0033 |
+
+| 数据集      | Probe F1 / steps | Oracle F1 / steps | Probe / Oracle | Best Fixed-K  | Probe vs Best Fixed |
+| -------- | ---------------- | ----------------- | -------------- | ------------- | ------------------- |
+| HotpotQA | 0.6544 / 1.73    | 0.7810 / 1.58     | 83.8%          | `K=3`, 0.6775 | -0.0231             |
+| MuSiQue  | 0.3969 / 3.31    | 0.4966 / 2.12     | 79.9%          | `K=5`, 0.4022 | -0.0053             |
+| 2Wiki    | 0.5941 / 1.82    | 0.6954 / 1.59     | 85.4%          | `K=2`, 0.5908 | +0.0033             |
+
 
 最适合 abstract / introduction 的说法：
 
@@ -45,54 +47,62 @@ PPO 不应进入标题、摘要或贡献列表；若后续保留，只适合放 
 
 ### 2.2 Stage 3: E-value 是风险监控，不是错误率硬控制
 
-主实验 \(\gamma=0.5,\alpha=0.1\)，predictive betting：
+主实验 \gamma=0.5,\alpha=0.1，predictive betting：
 
-| 数据集 | 策略 | F1 | Error Rate | Avg Steps |
-| --- | --- | ---: | ---: | ---: |
-| HotpotQA | Probe | 0.6569 | 0.3030 | 1.70 |
-| HotpotQA | Probe+E-value | 0.6654 | 0.2950 | 1.81 |
-| HotpotQA | Probe+CP | 0.6716 | 0.2960 | 4.11 |
-| MuSiQue | Probe | 0.4152 | 0.5803 | 3.39 |
-| MuSiQue | Probe+E-value | 0.4127 | 0.5827 | 3.41 |
-| MuSiQue | Probe+CP | 0.4015 | 0.5971 | 4.85 |
-| 2Wiki | Probe | 0.5639 | 0.4090 | 1.82 |
-| 2Wiki | Probe+E-value | 0.5728 | 0.4010 | 1.91 |
-| 2Wiki | Probe+CP | 0.5383 | 0.4370 | 4.32 |
+
+| 数据集      | 策略            | F1     | Error Rate | Avg Steps |
+| -------- | ------------- | ------ | ---------- | --------- |
+| HotpotQA | Probe         | 0.6569 | 0.3030     | 1.70      |
+| HotpotQA | Probe+E-value | 0.6654 | 0.2950     | 1.81      |
+| HotpotQA | Probe+CP      | 0.6716 | 0.2960     | 4.11      |
+| MuSiQue  | Probe         | 0.4152 | 0.5803     | 3.39      |
+| MuSiQue  | Probe+E-value | 0.4127 | 0.5827     | 3.41      |
+| MuSiQue  | Probe+CP      | 0.4015 | 0.5971     | 4.85      |
+| 2Wiki    | Probe         | 0.5639 | 0.4090     | 1.82      |
+| 2Wiki    | Probe+E-value | 0.5728 | 0.4010     | 1.91      |
+| 2Wiki    | Probe+CP      | 0.5383 | 0.4370     | 4.32      |
+
 
 可支撑的强结论：
 
 1. `Probe+E-value` 相对 `Probe` 的额外步数很小：约 `+0.5%` 到 `+6.4%`。
 2. HotpotQA 与 2Wiki 上，E-value 小幅改善 F1 和 error；MuSiQue 上基本持平，是高错误率 stress case。
 3. `Probe+CP` 不是稳定强基线：HotpotQA 上以巨大步数成本换取一点 F1，MuSiQue 和 2Wiki 上则又贵又差。
-4. E-value 的价值是 online risk evidence 和 drift sensitivity，不是把经验错误率压到 \(\alpha\) 以下。
+4. E-value 的价值是 online risk evidence 和 drift sensitivity，不是把经验错误率压到 \alpha 以下。
 
 E-wealth 主表述：
 
-| 数据集 | Final E-wealth at α=0.1 | Cap | 解读 |
-| --- | ---: | ---: | --- |
-| HotpotQA | 0.014 | 10 | 主实验下更像低成本提质门控 |
-| MuSiQue | 4.193 | 10 | 风险证据持续积累但未封顶 |
-| 2Wiki | 10.000 | 10 | 触及告警边界，强烈拒绝低错误率原假设 |
+
+| 数据集      | Final E-wealth at α=0.1 | Cap | 解读                 |
+| -------- | ----------------------- | --- | ------------------ |
+| HotpotQA | 0.014                   | 10  | 主实验下更像低成本提质门控      |
+| MuSiQue  | 4.193                   | 10  | 风险证据持续积累但未封顶       |
+| 2Wiki    | 10.000                  | 10  | 触及告警边界，强烈拒绝低错误率原假设 |
+
 
 ### 2.3 Stop-RAG 对齐已能进入主文
 
 同 split、同 sample id、真实在线早停：
 
-| 数据集 | 方法 | F1 | EM | Avg Steps |
-| --- | --- | ---: | ---: | ---: |
-| HotpotQA | Stop-RAG | 0.5963 | 0.4640 | 5.000 |
-| HotpotQA | Pandora Probe+E-value | 0.6654 | 0.5290 | 1.807 |
-| MuSiQue | Stop-RAG | 0.2654 | 0.1942 | 4.643 |
-| MuSiQue | Pandora Probe+E-value | 0.4127 | 0.3141 | 3.410 |
-| 2Wiki | Stop-RAG | 0.5076 | 0.4150 | 4.477 |
-| 2Wiki | Pandora Probe+E-value | 0.5728 | 0.4810 | 1.905 |
+
+| 数据集      | 方法                    | F1     | EM     | Avg Steps |
+| -------- | --------------------- | ------ | ------ | --------- |
+| HotpotQA | Stop-RAG              | 0.5963 | 0.4640 | 5.000     |
+| HotpotQA | Pandora Probe+E-value | 0.6654 | 0.5290 | 1.807     |
+| MuSiQue  | Stop-RAG              | 0.2654 | 0.1942 | 4.643     |
+| MuSiQue  | Pandora Probe+E-value | 0.4127 | 0.3141 | 3.410     |
+| 2Wiki    | Stop-RAG              | 0.5076 | 0.4150 | 4.477     |
+| 2Wiki    | Pandora Probe+E-value | 0.5728 | 0.4810 | 1.905     |
+
 
 宏平均：
 
-| 方法 | Macro F1 | Macro EM | Macro Steps |
-| --- | ---: | ---: | ---: |
-| Stop-RAG | 0.4564 | 0.3577 | 4.707 |
-| Pandora Probe+E-value | 0.5503 | 0.4414 | 2.374 |
+
+| 方法                    | Macro F1 | Macro EM | Macro Steps |
+| --------------------- | -------- | -------- | ----------- |
+| Stop-RAG              | 0.4564   | 0.3577   | 4.707       |
+| Pandora Probe+E-value | 0.5503   | 0.4414   | 2.374       |
+
 
 推荐写法：
 
@@ -158,32 +168,28 @@ Stop-RAG 对齐结果放在实验贡献里：
 主文方法层级建议固定为：
 
 1. **Problem formulation**
-   - \(s_k=(q,d_1,\ldots,d_k)\)
-   - \(Q(s_k)\), \(c_k\), \(\tau\)
-   - primary objective \(Q(s_\tau)-\sum c_k\)
-
+  - s_k=(q,d_1,\ldots,d_k)
+  - Q(s_k), c_k, \tau
+  - primary objective Q(s_\tau)-\sum c_k
 2. **Bellman oracle**
-   - \(V_K=Q_K\)
-   - \(V_k=\max(Q_k,V_{k+1}-c_{k+1})\)
-   - `margin` and `action_label`
-   - Oracle is upper bound and supervision, not deployable
-
+  - V_K=Q_K
+  - V_k=\max(Q_k,V_{k+1}-c_{k+1})
+  - `margin` and `action_label`
+  - Oracle is upper bound and supervision, not deployable
 3. **Neural stopping probe**
-   - hidden state + shallow features
-   - binary Continue classifier
-   - focal BCE + label smoothing
-   - dev Pareto threshold selection + per-step refinement
-
+  - hidden state + shallow features
+  - binary Continue classifier
+  - focal BCE + label smoothing
+  - dev Pareto threshold selection + per-step refinement
 4. **E-value monitor**
-   - quality model \(\hat p=P(F_1\ge\gamma)\)
-   - \(e_n=\mathbf{1}\{F_1<\gamma\}\)
-   - \(E_n=\prod_t(1-\lambda_t+\lambda_t e_t/\alpha)\)
-   - Ville guarantee
-   - quality bar / wealth-aware gate as implementation
-
+  - quality model \hat p=P(F_1\ge\gamma)
+  - e_n=\mathbf{1}F_1<\gamma
+  - E_n=\prod_t(1-\lambda_t+\lambda_t e_t/\alpha)
+  - Ville guarantee
+  - quality bar / wealth-aware gate as implementation
 5. **Baselines**
-   - Fixed-K, Probe, Probe+CP, Stop-RAG
-   - Global-Weitzman and Oracle separated as semi-oracle / oracle
+  - Fixed-K, Probe, Probe+CP, Stop-RAG
+  - Global-Weitzman and Oracle separated as semi-oracle / oracle
 
 ---
 
@@ -193,13 +199,13 @@ Stop-RAG 对齐结果放在实验贡献里：
 
 1. Fixed-order stopping admits Bellman optimality.
 2. A margin estimator recovers oracle actions outside low-margin and high-error regions.
-3. The E-process is a nonnegative supermartingale under \(H_0:\mathbb{E}[e_n|\mathcal{G}_{n-1}]\le\alpha\), giving Ville-style anytime-valid alerts.
+3. The E-process is a nonnegative supermartingale under H_0:\mathbb{E}[e_n|\mathcal{G}_{n-1}]\le\alpha, giving Ville-style anytime-valid alerts.
 
 不能证明：
 
 1. The deployed Probe is optimal.
 2. The Probe exactly learns Weitzman reservation values.
-3. E-value forces empirical error rate below \(\alpha\).
+3. E-value forces empirical error rate below \alpha.
 4. CP is universally invalid under all adaptive procedures.
 
 推荐术语：
@@ -308,7 +314,7 @@ No-shift vs sudden/gradual/periodic，展示 wealth 如何积累风险证据。
 - per-dataset optimal hyperparameters
 - p2_full31 negative result
 - predictive vs fixed betting
-- \(\gamma,\alpha\) sensitivity
+- \gamma,\alpha sensitivity
 - selective prediction coverage-accuracy
 - Stop-RAG stopping distribution
 

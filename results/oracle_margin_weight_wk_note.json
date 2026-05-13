@@ -1,0 +1,7 @@
+{
+  "implementation": "stage2/run_stage2.py::_build_xyw / _build_gru_trajectory_entries",
+  "formula": "w_k = max(margin_weight_floor, abs(m_k))",
+  "default_margin_weight_floor": 0.1,
+  "train_margin_min_abs": "optional filter: skip steps with abs(m_k) < train_margin_min_abs (default 0 = no skip)",
+  "loss": "sum(loss_per_step * w_k * mask) / sum(w_k * mask) for GRU; MLP uses w in denominator similarly"
+}

@@ -1,0 +1,80 @@
+{
+  "dataset": "musique",
+  "checkpoint": "artifacts/probe/musique/probe_mlp_alias_metric_aligned.pt",
+  "gamma": 0.5,
+  "threshold_spec": {
+    "1": 0.43,
+    "2": 0.61,
+    "3": 0.57,
+    "4": 0.65,
+    "5": 0.57
+  },
+  "stage3_scalar_threshold": 0.57,
+  "conservative_params": {
+    "margin_abs_lt": 0.1,
+    "threshold_boost": 0.1,
+    "probe_conf_half_width": 0.1,
+    "max_effective_threshold": 0.99,
+    "use_oracle_margin": false,
+    "use_probe_low_conf": true
+  },
+  "trajectory_summaries": {
+    "per_step_baseline": {
+      "strategy": "Probe(per-step-threshold)",
+      "avg_steps": 3.323741007194245,
+      "avg_cost": 0.16618705035971226,
+      "avg_f1": 0.4016182254196643,
+      "avg_em": 0.3237410071942446,
+      "error_rate": 0.6019184652278178,
+      "n": 417,
+      "abstain_count": 0,
+      "coverage": 1.0
+    },
+    "conservative": {
+      "strategy": "Probe+low-margin-conservative",
+      "avg_steps": 3.2038369304556356,
+      "avg_cost": 0.16019184652278176,
+      "avg_f1": 0.4027599520383693,
+      "avg_em": 0.3261390887290168,
+      "error_rate": 0.5995203836930456,
+      "n": 417,
+      "abstain_count": 0,
+      "coverage": 1.0
+    },
+    "stage3_scalar_baseline": {
+      "strategy": "Probe(stage3 scalar ckpt.threshold)",
+      "avg_steps": 3.563549160671463,
+      "avg_cost": 0.17817745803357316,
+      "avg_f1": 0.42454004796163075,
+      "avg_em": 0.3381294964028777,
+      "error_rate": 0.5755395683453237,
+      "n": 417,
+      "abstain_count": 0,
+      "coverage": 1.0
+    }
+  },
+  "step_level_continue": {
+    "per_step_baseline": {
+      "n_steps": 1668,
+      "tn": 620,
+      "fp": 527,
+      "fn": 66,
+      "tp": 455,
+      "continue_fp": 527,
+      "continue_precision": 0.46334012219959264,
+      "continue_recall": 0.8733205374280231,
+      "continue_f1": 0.605455755156354
+    },
+    "conservative": {
+      "n_steps": 1668,
+      "tn": 661,
+      "fp": 486,
+      "fn": 75,
+      "tp": 446,
+      "continue_fp": 486,
+      "continue_precision": 0.47854077253218885,
+      "continue_recall": 0.8560460652591171,
+      "continue_f1": 0.6139022711631108
+    }
+  }
+}

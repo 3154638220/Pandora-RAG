@@ -304,8 +304,8 @@ We also audit the deployment overhead of the stopping features. Table~\ref{tab:l
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=0.92\linewidth]{results/stage3_final_pareto_all.png}
-  \caption{F1 versus average retrieval steps for the oracle, structural baselines, Probe, Probe+E-value, and Probe+CP. Probe remains in the low-cost region; adding the E-value monitor produces only a small change in average steps, whereas CP moves the system toward substantially larger retrieval budgets.}
+  \includegraphics[width=0.92\linewidth]{paper/figs/stage3_final_pareto_all.pdf}
+  \caption{Answer F1 versus average retrieval steps (upper-left is preferable). Oracle is a structural upper bound from rolled-out trajectories, not a deployable baseline, and is shown as a hollow star; the dashed line connects non-dominated points. Insets magnify the Probe / Probe+E-value / Probe+CP / Global-Weitzman region where differences are small.}
   \label{fig:pareto}
 \end{figure}
 
@@ -362,12 +362,8 @@ Figure~\ref{fig:evalue-shift-evidence} shows a representative \hotpot{} case at 
 
 \begin{figure*}[t]
   \centering
-  \includegraphics[width=0.32\linewidth]{figs/evalue_hotpotqa_noshift.png}
-  \hfill
-  \includegraphics[width=0.32\linewidth]{figs/evalue_hotpotqa_sudden.png}
-  \hfill
-  \includegraphics[width=0.32\linewidth]{figs/evalue_hotpotqa_cumerr_sudden.png}
-  \caption{Representative online risk-evidence plots for \hotpot{} at $\alpha=0.1$ and $\gamma=0.5$. Left: no-shift E-wealth trace, where the monitor remains well below the rejection boundary for most of the test stream. Middle: sudden-shift E-wealth trace, where the same monitor rises to the cap once more difficult examples are concentrated later in the stream. Right: cumulative error under sudden shift for Probe, Probe+E-value, and Probe+CP-quantile. The E-value layer should be interpreted as an online evidence process on the stopped stream, not as a mechanism that forces the empirical error curve below $\alpha$.}
+  \includegraphics[width=\linewidth]{paper/figs/evalue_hotpotqa_triple.pdf}
+  \caption{Representative online risk-evidence plots for \hotpot{} at $\alpha=0.1$ and $\gamma=0.5$. \emph{Left:} E-wealth under no shift, remaining well below the alarm boundary at $1/\alpha=10$ for most of the stream. \emph{Middle:} the same monitor under sudden shift, where wealth rises to the cap once harder examples are concentrated late in the stream. \emph{Right:} cumulative error (sudden shift): the main panel plots the excess cumulative error relative to Probe so that small differences are visible; the inset shows raw cumulative error on the late segment of the stream. The E-value layer is an online evidence process on the stopped stream, not a mechanism that forces the empirical error curve below $\alpha$.}
   \label{fig:evalue-shift-evidence}
 \end{figure*}
 
@@ -745,9 +741,7 @@ This matched-budget view complements Table~\ref{tab:stoprag}. It shows that the 
 
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=0.32\linewidth]{results/stop_rag_pareto_hotpotqa.png}
-  \includegraphics[width=0.32\linewidth]{results/stop_rag_pareto_musique.png}
-  \includegraphics[width=0.32\linewidth]{results/stop_rag_pareto_2wiki.png}
+    \includegraphics[width=\linewidth]{paper/figs/stop_rag_pareto_1x3.pdf}
   \caption{Aligned online fixed-checkpoint Stop-RAG threshold-sweep frontiers on \hotpot{}, \musique{}, and \twowiki{}. The sweep treats Stop-RAG as a Pareto baseline rather than a single-threshold comparison; \method{} Probe+E-value remains above the swept frontier on all three datasets.}
   \label{fig:stoprag}
 \end{figure}

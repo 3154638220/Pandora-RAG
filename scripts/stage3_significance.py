@@ -301,9 +301,13 @@ def _generate_markdown(
     summary_rows: Sequence[Mapping[str, Any]],
     pair_rows: Sequence[Mapping[str, Any]],
     meta_rows: Sequence[Mapping[str, Any]],
+    title_note: str = "",
 ) -> None:
     lines: List[str] = []
-    lines.append("# Stage3 Statistical Significance")
+    title = "# Stage3 Statistical Significance"
+    if title_note:
+        title = f"{title} ({title_note})"
+    lines.append(title)
     lines.append("")
     lines.append("Paired bootstrap and paired randomization results for the Stage-3 main operating point.")
     lines.append("")
@@ -376,6 +380,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--results-dir", type=str, default="results")
     parser.add_argument("--docs-dir", type=str, default="docs")
     parser.add_argument("--artifact-suffix", type=str, default="pdopt_best")
+    parser.add_argument(
+        "--output-suffix",
+        type=str,
+        default="",
+        help="If non-empty, append _<suffix> to CSV/JSON/MD filenames (e.g. alias_metric_aligned).",
+    )
     parser.add_argument("--probe-checkpoint", type=str, default="")
     parser.add_argument("--gamma", type=float, default=0.5)
     parser.add_argument("--alpha", type=float, default=0.1)
@@ -489,10 +499,12 @@ def main() -> None:
 
     results_dir = root / str(args.results_dir)
     docs_dir = root / str(args.docs_dir)
-    summary_path = results_dir / "stage3_significance_summary.csv"
-    pairs_path = results_dir / "stage3_significance_paired.csv"
-    meta_path = results_dir / "stage3_significance_meta.json"
-    report_path = docs_dir / "stage3_significance_report.md"
+    out_tag = f"_{args.output_suffix}" if str(args.output_suffix).strip() else ""
+    summary_path = results_dir / f"stage3_significance_summary{out_tag}.csv"
+    pairs_path = results_dir / f"stage3_significance_paired{out_tag}.csv"
+    meta_path = results_dir / f"stage3_significance_meta{out_tag}.json"
+    report_path = docs_dir / f"stage3_significance_report{out_tag}.md"
+    title_note = str(args.output_suffix).strip()
 
     _write_csv(
         summary_path,
@@ -537,7 +549,7 @@ def main() -> None:
         ],
     )
     meta_path.write_text(json.dumps(meta_rows, indent=2, ensure_ascii=False), encoding="utf-8")
-    _generate_markdown(report_path, summary_rows, pair_rows, meta_rows)
+    _generate_markdown(report_path, summary_rows, pair_rows, meta_rows, title_note=title_note)
 
     LOGGER.info("Wrote %s", summary_path)
     LOGGER.info("Wrote %s", pairs_path)

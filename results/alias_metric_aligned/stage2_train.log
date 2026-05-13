@@ -1,0 +1,90 @@
+2026-04-27 19:35:15,820 [INFO] ===== Stage2 dataset: hotpotqa =====
+2026-04-27 19:35:15,820 [INFO] per-dataset-optimal：hotpotqa → compress_dim=256, margin=0, probe_target=binary, hidden_branch_residual=False
+2026-04-27 19:35:57,930 [INFO] hotpotqa train 步级标签 stop/continue：stop=85.64% (13666), continue=14.36% (2292)
+2026-04-27 19:35:57,930 [INFO] hotpotqa dev 步级标签 stop/continue：stop=83.80% (3347), continue=16.20% (647)
+2026-04-27 19:35:57,931 [INFO] hotpotqa dev 浅层扩展维 std（Delta×7 + cum_ratio + D4×3 + P2 稳定性特征，StandardScaler 前）: [0.4715 0.3968 0.132  0.     4.7847 0.     0.     0.0774 0.1382 0.2236
+ 0.4562 0.1892 0.0869 0.4125 0.1961 0.3199 0.3051 0.0835 0.3816 0.
+ 0.1349 0.4284]
+2026-04-27 19:35:58,086 [INFO] ProbeMLP_v2：hidden_dim=4096, shallow_in=31, compress=256, fuse=128, hidden_residual=False（浅层 StandardScaler，hidden 用 LayerNorm）。
+2026-04-27 19:35:59,730 [INFO] Probe epoch 01 | lr=3.00e-05 | train_loss=0.056187 | dev_loss=0.046585
+2026-04-27 19:36:00,315 [INFO] Probe epoch 02 | lr=9.75e-05 | train_loss=0.042377 | dev_loss=0.039628
+2026-04-27 19:36:00,887 [INFO] Probe epoch 03 | lr=1.65e-04 | train_loss=0.040261 | dev_loss=0.039351
+2026-04-27 19:36:01,385 [INFO] Probe epoch 04 | lr=2.32e-04 | train_loss=0.038024 | dev_loss=0.037040
+2026-04-27 19:36:01,891 [INFO] Probe epoch 05 | lr=3.00e-04 | train_loss=0.036587 | dev_loss=0.037184
+2026-04-27 19:36:02,369 [INFO] Probe epoch 06 | lr=3.00e-04 | train_loss=0.035154 | dev_loss=0.035962
+2026-04-27 19:36:02,836 [INFO] Probe epoch 07 | lr=2.99e-04 | train_loss=0.033895 | dev_loss=0.035652
+2026-04-27 19:36:03,320 [INFO] Probe epoch 08 | lr=2.98e-04 | train_loss=0.032119 | dev_loss=0.041864
+2026-04-27 19:36:03,800 [INFO] Probe epoch 09 | lr=2.96e-04 | train_loss=0.032208 | dev_loss=0.037753
+2026-04-27 19:36:04,313 [INFO] Probe epoch 10 | lr=2.94e-04 | train_loss=0.030483 | dev_loss=0.037554
+2026-04-27 19:36:04,802 [INFO] Probe epoch 11 | lr=2.91e-04 | train_loss=0.029707 | dev_loss=0.038210
+2026-04-27 19:36:05,298 [INFO] Probe epoch 12 | lr=2.88e-04 | train_loss=0.028422 | dev_loss=0.038813
+2026-04-27 19:36:05,779 [INFO] Probe epoch 13 | lr=2.85e-04 | train_loss=0.027608 | dev_loss=0.039816
+2026-04-27 19:36:06,406 [INFO] Probe epoch 14 | lr=2.81e-04 | train_loss=0.026202 | dev_loss=0.040569
+2026-04-27 19:36:06,900 [INFO] Probe epoch 15 | lr=2.76e-04 | train_loss=0.025892 | dev_loss=0.052228
+2026-04-27 19:36:07,384 [INFO] Probe epoch 16 | lr=2.71e-04 | train_loss=0.024219 | dev_loss=0.044908
+2026-04-27 19:36:07,874 [INFO] Probe epoch 17 | lr=2.66e-04 | train_loss=0.023407 | dev_loss=0.051420
+2026-04-27 19:36:08,349 [INFO] Probe epoch 18 | lr=2.61e-04 | train_loss=0.022408 | dev_loss=0.050209
+2026-04-27 19:36:08,824 [INFO] Probe epoch 19 | lr=2.55e-04 | train_loss=0.023112 | dev_loss=0.061963
+2026-04-27 19:36:08,824 [INFO] Early stop at epoch 19 (best epoch=7)
+2026-04-27 19:36:27,178 [INFO] Step 1: n=4000, mean_gain=0.5255, r*=0.8867
+2026-04-27 19:36:27,179 [INFO] Step 2: n=4000, mean_gain=0.2202, r*=0.7630
+2026-04-27 19:36:27,179 [INFO] Step 3: n=3983, mean_gain=0.0052, r*=-0.0026
+2026-04-27 19:36:27,180 [INFO] Step 4: n=3975, mean_gain=0.0032, r*=-0.0191
+2026-04-27 19:36:27,180 [INFO] Step 5: n=3971, mean_gain=-0.0067, r*=-0.0299
+2026-04-27 19:36:29,769 [INFO] hotpotqa Phase C 阈值：GW_dev_avg_steps=1.644 cap_mult=1.050 chosen_λ=0.1 policy=per_step threshold=[0.71, 0.71, 0.73, 0.73, 0.71] dev_f1=0.6532 dev_steps=1.709
+2026-04-27 19:36:29,777 [INFO] hotpotqa Appendix max-F1：dev threshold=0.550 dev_f1=0.6826 dev_steps=2.840 | test_f1=0.6964 test_steps=2.826
+2026-04-27 19:36:29,819 [INFO] Step 1: n=4000, mean_gain=0.5255, r*=0.8867
+2026-04-27 19:36:29,819 [INFO] Step 2: n=4000, mean_gain=0.2202, r*=0.7630
+2026-04-27 19:36:29,820 [INFO] Step 3: n=3983, mean_gain=0.0052, r*=-0.0026
+2026-04-27 19:36:29,820 [INFO] Step 4: n=3975, mean_gain=0.0032, r*=-0.0191
+2026-04-27 19:36:29,821 [INFO] Step 5: n=3971, mean_gain=-0.0067, r*=-0.0299
+2026-04-27 19:36:29,835 [INFO] Deployable-GW [self_consistency] step 1: n=4000, mean_gain=1.0000, r*=0.9500
+2026-04-27 19:36:29,835 [INFO] Deployable-GW [self_consistency] step 2: n=4000, mean_gain=0.0000, r*=-0.0500
+2026-04-27 19:36:29,836 [INFO] Deployable-GW [self_consistency] step 3: n=3983, mean_gain=0.0000, r*=-0.0500
+2026-04-27 19:36:29,836 [INFO] Deployable-GW [self_consistency] step 4: n=3975, mean_gain=0.0000, r*=-0.0500
+2026-04-27 19:36:29,837 [INFO] Deployable-GW [self_consistency] step 5: n=3971, mean_gain=0.0000, r*=-0.0500
+2026-04-27 19:36:30,152 [INFO] ===== Stage2 dataset: musique =====
+2026-04-27 19:36:30,152 [INFO] per-dataset-optimal：musique → compress_dim=256, margin=0, probe_target=binary, hidden_branch_residual=False
+2026-04-27 19:37:09,175 [INFO] musique train 步级标签 stop/continue：stop=76.32% (12211), continue=23.68% (3789)
+2026-04-27 19:37:09,175 [INFO] musique dev 步级标签 stop/continue：stop=75.70% (3028), continue=24.30% (972)
+2026-04-27 19:37:09,176 [INFO] musique dev 浅层扩展维 std（Delta×7 + cum_ratio + D4×3 + P2 稳定性特征，StandardScaler 前）: [0.6098 0.5138 0.1803 0.     4.161  0.     0.     0.0916 0.0668 0.2236
+ 0.492  0.1585 0.0919 0.4306 0.2196 0.3203 0.3036 0.0968 0.3905 0.
+ 0.182  0.4278]
+2026-04-27 19:37:09,231 [INFO] ProbeMLP_v2：hidden_dim=4096, shallow_in=31, compress=256, fuse=128, hidden_residual=False（浅层 StandardScaler，hidden 用 LayerNorm）。
+2026-04-27 19:37:09,724 [INFO] Probe epoch 01 | lr=3.00e-05 | train_loss=0.071390 | dev_loss=0.060125
+2026-04-27 19:37:10,222 [INFO] Probe epoch 02 | lr=9.75e-05 | train_loss=0.053136 | dev_loss=0.053994
+2026-04-27 19:37:10,728 [INFO] Probe epoch 03 | lr=1.65e-04 | train_loss=0.048331 | dev_loss=0.053272
+2026-04-27 19:37:11,225 [INFO] Probe epoch 04 | lr=2.32e-04 | train_loss=0.046569 | dev_loss=0.054381
+2026-04-27 19:37:11,855 [INFO] Probe epoch 05 | lr=3.00e-04 | train_loss=0.044856 | dev_loss=0.052286
+2026-04-27 19:37:12,353 [INFO] Probe epoch 06 | lr=3.00e-04 | train_loss=0.043182 | dev_loss=0.054719
+2026-04-27 19:37:12,855 [INFO] Probe epoch 07 | lr=2.99e-04 | train_loss=0.041420 | dev_loss=0.053538
+2026-04-27 19:37:13,403 [INFO] Probe epoch 08 | lr=2.98e-04 | train_loss=0.041248 | dev_loss=0.052980
+2026-04-27 19:37:13,919 [INFO] Probe epoch 09 | lr=2.96e-04 | train_loss=0.039341 | dev_loss=0.053733
+2026-04-27 19:37:14,429 [INFO] Probe epoch 10 | lr=2.94e-04 | train_loss=0.037461 | dev_loss=0.062923
+2026-04-27 19:37:14,935 [INFO] Probe epoch 11 | lr=2.91e-04 | train_loss=0.035611 | dev_loss=0.054548
+2026-04-27 19:37:15,425 [INFO] Probe epoch 12 | lr=2.88e-04 | train_loss=0.035767 | dev_loss=0.074532
+2026-04-27 19:37:15,926 [INFO] Probe epoch 13 | lr=2.85e-04 | train_loss=0.033513 | dev_loss=0.059935
+2026-04-27 19:37:16,426 [INFO] Probe epoch 14 | lr=2.81e-04 | train_loss=0.031971 | dev_loss=0.060190
+2026-04-27 19:37:16,925 [INFO] Probe epoch 15 | lr=2.76e-04 | train_loss=0.031346 | dev_loss=0.068034
+2026-04-27 19:37:17,412 [INFO] Probe epoch 16 | lr=2.71e-04 | train_loss=0.028791 | dev_loss=0.070269
+2026-04-27 19:37:17,917 [INFO] Probe epoch 17 | lr=2.66e-04 | train_loss=0.029710 | dev_loss=0.069468
+2026-04-27 19:37:17,917 [INFO] Early stop at epoch 17 (best epoch=5)
+2026-04-27 19:37:32,272 [INFO] Step 1: n=4000, mean_gain=0.1688, r*=0.5551
+2026-04-27 19:37:32,273 [INFO] Step 2: n=4000, mean_gain=0.2933, r*=0.7953
+2026-04-27 19:37:32,274 [INFO] Step 3: n=4000, mean_gain=0.0424, r*=0.3926
+2026-04-27 19:37:32,274 [INFO] Step 4: n=4000, mean_gain=0.0126, r*=0.0747
+2026-04-27 19:37:32,275 [INFO] Step 5: n=4000, mean_gain=-0.0029, r*=-0.0171
+2026-04-27 19:37:34,951 [INFO] musique Phase C 阈值：GW_dev_avg_steps=2.897 cap_mult=1.050 chosen_λ=0.1 policy=per_step threshold=[0.43, 0.61, 0.57, 0.65, 0.57] dev_f1=0.4706 dev_steps=2.742
+2026-04-27 19:37:34,954 [INFO] musique Appendix max-F1：dev threshold=0.570 dev_f1=0.4701 dev_steps=2.952 | test_f1=0.4245 test_steps=3.564
+2026-04-27 19:37:34,974 [INFO] Step 1: n=4000, mean_gain=0.1688, r*=0.5551
+2026-04-27 19:37:34,975 [INFO] Step 2: n=4000, mean_gain=0.2933, r*=0.7953
+2026-04-27 19:37:34,975 [INFO] Step 3: n=4000, mean_gain=0.0424, r*=0.3926
+2026-04-27 19:37:34,976 [INFO] Step 4: n=4000, mean_gain=0.0126, r*=0.0747
+2026-04-27 19:37:34,976 [INFO] Step 5: n=4000, mean_gain=-0.0029, r*=-0.0171
+2026-04-27 19:37:34,988 [INFO] Deployable-GW [self_consistency] step 1: n=4000, mean_gain=1.0000, r*=0.9500
+2026-04-27 19:37:34,988 [INFO] Deployable-GW [self_consistency] step 2: n=4000, mean_gain=0.0000, r*=-0.0500
+2026-04-27 19:37:34,989 [INFO] Deployable-GW [self_consistency] step 3: n=4000, mean_gain=0.0000, r*=-0.0500
+2026-04-27 19:37:34,989 [INFO] Deployable-GW [self_consistency] step 4: n=4000, mean_gain=0.0000, r*=-0.0500
+2026-04-27 19:37:34,989 [INFO] Deployable-GW [self_consistency] step 5: n=4000, mean_gain=0.0000, r*=-0.0500
+2026-04-27 19:37:35,253 [INFO] ===== Stage2 dataset: 2wiki =====
+2026-04-27 19:37:35,253 [INFO] per-dataset-optimal：2wiki → compress_dim=64, margin=0.02, probe_target=binary, hidden_branch_residual=True

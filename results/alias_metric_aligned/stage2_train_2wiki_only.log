@@ -1,0 +1,47 @@
+2026-04-27 19:39:57,523 [INFO] ===== Stage2 dataset: 2wiki =====
+2026-04-27 19:39:57,524 [INFO] per-dataset-optimal：2wiki → compress_dim=64, margin=0.02, probe_target=binary, hidden_branch_residual=True
+2026-04-27 19:40:29,954 [INFO] 2wiki 硬 margin 过滤：train_margin_min_abs=0.0200，丢弃步数=10，保留可训练步数=15990
+2026-04-27 19:40:29,954 [INFO] 2wiki train 步级标签 stop/continue：stop=82.62% (13211), continue=17.38% (2779)
+2026-04-27 19:40:29,954 [INFO] 2wiki dev 步级标签 stop/continue：stop=81.47% (3259), continue=18.52% (741)
+2026-04-27 19:40:29,955 [INFO] 2wiki dev 浅层扩展维 std（Delta×7 + cum_ratio + D4×3 + P2 稳定性特征，StandardScaler 前）: [0.4624 0.3891 0.1247 0.     5.1443 0.     0.     0.0783 0.0625 0.2236
+ 0.4768 0.1694 0.0896 0.4142 0.1976 0.3114 0.303  0.0862 0.3711 0.
+ 0.1304 0.4279]
+2026-04-27 19:40:30,116 [INFO] ProbeMLP_v2：hidden_dim=4096, shallow_in=31, compress=64, fuse=128, hidden_residual=True（浅层 StandardScaler，hidden 用 LayerNorm）。
+2026-04-27 19:40:31,702 [INFO] Probe epoch 01 | lr=3.00e-05 | train_loss=0.062336 | dev_loss=0.054173
+2026-04-27 19:40:32,340 [INFO] Probe epoch 02 | lr=9.75e-05 | train_loss=0.042184 | dev_loss=0.046730
+2026-04-27 19:40:32,976 [INFO] Probe epoch 03 | lr=1.65e-04 | train_loss=0.035170 | dev_loss=0.045194
+2026-04-27 19:40:33,624 [INFO] Probe epoch 04 | lr=2.32e-04 | train_loss=0.032204 | dev_loss=0.054056
+2026-04-27 19:40:34,321 [INFO] Probe epoch 05 | lr=3.00e-04 | train_loss=0.029396 | dev_loss=0.046298
+2026-04-27 19:40:34,972 [INFO] Probe epoch 06 | lr=3.00e-04 | train_loss=0.027524 | dev_loss=0.043212
+2026-04-27 19:40:35,625 [INFO] Probe epoch 07 | lr=2.99e-04 | train_loss=0.026207 | dev_loss=0.044989
+2026-04-27 19:40:36,317 [INFO] Probe epoch 08 | lr=2.98e-04 | train_loss=0.024680 | dev_loss=0.052297
+2026-04-27 19:40:37,034 [INFO] Probe epoch 09 | lr=2.96e-04 | train_loss=0.024232 | dev_loss=0.047810
+2026-04-27 19:40:37,735 [INFO] Probe epoch 10 | lr=2.94e-04 | train_loss=0.023846 | dev_loss=0.055997
+2026-04-27 19:40:38,425 [INFO] Probe epoch 11 | lr=2.91e-04 | train_loss=0.021111 | dev_loss=0.051147
+2026-04-27 19:40:39,114 [INFO] Probe epoch 12 | lr=2.88e-04 | train_loss=0.021003 | dev_loss=0.066759
+2026-04-27 19:40:39,816 [INFO] Probe epoch 13 | lr=2.85e-04 | train_loss=0.019617 | dev_loss=0.086101
+2026-04-27 19:40:40,677 [INFO] Probe epoch 14 | lr=2.81e-04 | train_loss=0.017701 | dev_loss=0.142303
+2026-04-27 19:40:41,442 [INFO] Probe epoch 15 | lr=2.76e-04 | train_loss=0.017951 | dev_loss=0.056316
+2026-04-27 19:40:42,206 [INFO] Probe epoch 16 | lr=2.71e-04 | train_loss=0.015890 | dev_loss=0.076913
+2026-04-27 19:40:42,911 [INFO] Probe epoch 17 | lr=2.66e-04 | train_loss=0.015318 | dev_loss=0.086422
+2026-04-27 19:40:43,628 [INFO] Probe epoch 18 | lr=2.61e-04 | train_loss=0.013810 | dev_loss=0.162145
+2026-04-27 19:40:43,628 [INFO] Early stop at epoch 18 (best epoch=6)
+2026-04-27 19:41:00,588 [INFO] Step 1: n=4000, mean_gain=0.3156, r*=0.8230
+2026-04-27 19:41:00,588 [INFO] Step 2: n=4000, mean_gain=0.4302, r*=0.8777
+2026-04-27 19:41:00,589 [INFO] Step 3: n=4000, mean_gain=-0.0267, r*=-0.0209
+2026-04-27 19:41:00,589 [INFO] Step 4: n=4000, mean_gain=-0.0053, r*=-0.0227
+2026-04-27 19:41:00,590 [INFO] Step 5: n=4000, mean_gain=-0.0105, r*=-0.0343
+2026-04-27 19:41:04,301 [INFO] 2wiki Phase C 阈值：GW_dev_avg_steps=1.773 cap_mult=1.050 chosen_λ=0.1 policy=per_step threshold=[0.67, 0.79, 0.71, 0.81, 0.71] dev_f1=0.5962 dev_steps=1.859
+2026-04-27 19:41:04,309 [INFO] 2wiki Appendix max-F1：dev threshold=0.590 dev_f1=0.6062 dev_steps=2.432 | test_f1=0.5993 test_steps=2.434
+2026-04-27 19:41:04,350 [INFO] Step 1: n=4000, mean_gain=0.3156, r*=0.8230
+2026-04-27 19:41:04,350 [INFO] Step 2: n=4000, mean_gain=0.4302, r*=0.8777
+2026-04-27 19:41:04,351 [INFO] Step 3: n=4000, mean_gain=-0.0267, r*=-0.0209
+2026-04-27 19:41:04,351 [INFO] Step 4: n=4000, mean_gain=-0.0053, r*=-0.0227
+2026-04-27 19:41:04,352 [INFO] Step 5: n=4000, mean_gain=-0.0105, r*=-0.0343
+2026-04-27 19:41:04,367 [INFO] Deployable-GW [self_consistency] step 1: n=4000, mean_gain=1.0000, r*=0.9500
+2026-04-27 19:41:04,367 [INFO] Deployable-GW [self_consistency] step 2: n=4000, mean_gain=0.0000, r*=-0.0500
+2026-04-27 19:41:04,367 [INFO] Deployable-GW [self_consistency] step 3: n=4000, mean_gain=0.0000, r*=-0.0500
+2026-04-27 19:41:04,368 [INFO] Deployable-GW [self_consistency] step 4: n=4000, mean_gain=0.0000, r*=-0.0500
+2026-04-27 19:41:04,368 [INFO] Deployable-GW [self_consistency] step 5: n=4000, mean_gain=0.0000, r*=-0.0500
+2026-04-27 19:41:04,659 [INFO] Stage2 complete. Report: /home/x12dpg/hjx/Pandora-RAG/docs/stage2_report_alias_metric_aligned.md | Appendix max-F1 summary: /home/x12dpg/hjx/Pandora-RAG/results/stage2_appendix_maxf1_summary_alias_metric_aligned.csv
+2026-04-27 19:41:04,659 [INFO] 2wiki | probe_f1=0.5893 | gain_vs_fixed=-0.0015 | oracle_gap=0.1061

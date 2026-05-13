@@ -1,0 +1,4 @@
+dataset,available,selection_rule,dev_threshold,dev_avg_f1,dev_avg_steps,test_avg_f1,test_avg_steps,main_probe_test_avg_f1,main_probe_test_avg_steps,delta_test_f1_vs_main,delta_test_steps_vs_main
+hotpotqa,True,dev_max_f1_global_threshold,0.55,0.6825966,2.84,0.6964398,2.826,0.6578769999999999,1.701,0.03856280000000012,1.125
+musique,True,dev_max_f1_global_threshold,0.57,0.47006129999999996,2.952,0.42454004796163075,3.563549160671463,0.4016182254196643,3.323741007194245,0.022921822541966452,0.23980815347721807
+2wiki,True,dev_max_f1_global_threshold,0.59,0.6061791999999999,2.432,0.5992773,2.434,0.5892854999999999,1.85,0.009991800000000106,0.5840000000000001

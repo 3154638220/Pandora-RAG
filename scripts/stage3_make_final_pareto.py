@@ -1,5 +1,8 @@
 """
-Generate the final Stage 3 closeout Pareto figures.
+Generate the final Stage 3 closeout Pareto figures (quick PNG to results/).
+
+For camera-ready PDFs, shared legend, insets, and axis labels, use:
+  python scripts/paper_export_figures.py
 
 This aligns Stage 1 / Stage 2 / Stage 3 operating points on the same
 "avg_steps vs avg_f1" plane using:

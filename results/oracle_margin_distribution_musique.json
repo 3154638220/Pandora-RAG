@@ -1,0 +1,21 @@
+{
+  "dataset": "musique",
+  "n_supervised_steps": 1668,
+  "near_tie_frac_abs_m_lt_0.05": 0.07733812949640288,
+  "mid_frac_0.05_le_abs_m_lt_0.1": 0.5701438848920863,
+  "clear_frac_abs_m_ge_0.1": 0.35251798561151076,
+  "abs_m_mean": 0.2737280575539568,
+  "abs_m_std": 0.35213796552875476,
+  "abs_m_percentiles": {
+    "5": 0.04999999999999999,
+    "25": 0.05,
+    "50": 0.050000000000000044,
+    "75": 0.45,
+    "95": 0.95
+  },
+  "signed_m_mean": 0.15167505995203837,
+  "signed_m_std": 0.41943160640030264,
+  "frac_margin_positive": 0.31235011990407674,
+  "histogram_png_abs": "results/oracle_margin_abs_histogram_musique.png",
+  "histogram_png_signed": "results/oracle_margin_signed_histogram_musique.png"
+}

@@ -1,0 +1,56 @@
+[
+  {
+    "dataset": "hotpotqa",
+    "n": 1000,
+    "gamma": 0.5,
+    "alpha": 0.1,
+    "probe_checkpoint": "artifacts/probe/hotpotqa/probe_mlp_alias_metric_aligned.pt",
+    "probe_threshold": 0.71,
+    "quality_bar": 0.31500608055418017,
+    "conformal_min_phat": 0.7546627216876431,
+    "quality_model_eval": {
+      "brier_score": 0.19467163145904365,
+      "ece": 0.10435880848973804,
+      "n_samples": 4986,
+      "positive_rate": 0.6327717900276184
+    },
+    "final_e_wealth": 0.013561001443004287,
+    "wealth_cap": 10.0
+  },
+  {
+    "dataset": "musique",
+    "n": 417,
+    "gamma": 0.5,
+    "alpha": 0.1,
+    "probe_checkpoint": "artifacts/probe/musique/probe_mlp_alias_metric_aligned.pt",
+    "probe_threshold": 0.57,
+    "quality_bar": 0.28634231842622554,
+    "conformal_min_phat": 0.8078988331299889,
+    "quality_model_eval": {
+      "brier_score": 0.191047342176221,
+      "ece": 0.10288993038064376,
+      "n_samples": 5000,
+      "positive_rate": 0.36419999599456787
+    },
+    "final_e_wealth": 5.611177964181124,
+    "wealth_cap": 10.0
+  },
+  {
+    "dataset": "2wiki",
+    "n": 1000,
+    "gamma": 0.5,
+    "alpha": 0.1,
+    "probe_checkpoint": "artifacts/probe/2wiki/probe_mlp_alias_metric_aligned.pt",
+    "probe_threshold": 0.71,
+    "quality_bar": 0.2600975915835732,
+    "conformal_min_phat": 0.8049489784786521,
+    "quality_model_eval": {
+      "brier_score": 0.1901738931983204,
+      "ece": 0.02638312010207583,
+      "n_samples": 5000,
+      "positive_rate": 0.5275999903678894
+    },
+    "final_e_wealth": 2.0317881120408865,
+    "wealth_cap": 10.0
+  }
+]
