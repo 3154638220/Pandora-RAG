@@ -1,7 +1,7 @@
 """
 Phase D1：训练集特征 vs action_label 诊断（point-biserial、AUROC、hidden PCA、Oracle margin 分布）。
 
-产出：docs/stage2_feature_diagnostic.md 与 results/stage2_feature_diagnostic_pca_<dataset>.png
+产出：docs/reports/stage2/stage2_feature_diagnostic.md 与 results/stage2_feature_diagnostic_pca_<dataset>.png
 
 用法：
   python -m stage2.run_feature_diagnostic --datasets hotpotqa,musique,2wiki

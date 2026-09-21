@@ -75,4 +75,4 @@ python scripts/p2_backbone_retriever_aggregate.py \
   --datasets "${P2_DATASETS}" \
   --out results/p2_backbone_retriever_sanity.csv
 
-echo "Done. See results/p2_backbone_retriever_sanity.csv and docs/p2_backbone_retriever_sanity.md"
+echo "Done. See results/p2_backbone_retriever_sanity.csv and docs/reports/baselines/p2_backbone_retriever_sanity.md"

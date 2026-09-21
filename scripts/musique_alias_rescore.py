@@ -3,7 +3,7 @@
 将 MuSiQue 的 answer_aliases 合并进 Stage1 processed JSONL，并对已有 trajectories.jsonl
 离线重算每步 F1/EM（multi-gold max-F1 / any-EM）。
 
-用法见 docs/musique_alias_metric_alignment.md。完成后建议在同一 stage1-root 下执行：
+用法见 docs/reports/baselines/musique_alias_metric_alignment.md。完成后建议在同一 stage1-root 下执行：
 
   python -m stage1.run_stage1 --datasets musique --skip-prepare --skip-trajectories \\
     --root-dir <stage1-root>

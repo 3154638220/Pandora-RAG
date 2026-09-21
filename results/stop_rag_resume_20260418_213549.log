@@ -1,37 +1,0 @@
-=== Stop-RAG resume log: /home/x12dpg/hjx/Pandora-RAG/results/stop_rag_resume_20260418_213549.log ===
-=== 2wiki resume compute_metrics: have 4096 / 20000 lines ===
-INFO 04-18 21:35:54 [utils.py:233] non-default args: {'trust_remote_code': True, 'dtype': torch.bfloat16, 'max_model_len': 8192, 'enable_prefix_caching': True, 'gpu_memory_utilization': 0.88, 'disable_log_stats': True, 'enforce_eager': True, 'model': '/home/x12dpg/hjx/Pandora-RAG/models/Meta-Llama-3.1-8B-Instruct'}
-INFO 04-18 21:35:54 [model.py:533] Resolved architecture: LlamaForCausalLM
-INFO 04-18 21:35:54 [model.py:1582] Using max model len 8192
-INFO 04-18 21:35:54 [scheduler.py:231] Chunked prefill is enabled with max_num_batched_tokens=8192.
-INFO 04-18 21:35:54 [vllm.py:775] Asynchronous scheduling is enabled.
-WARNING 04-18 21:35:54 [vllm.py:809] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
-WARNING 04-18 21:35:54 [vllm.py:820] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
-INFO 04-18 21:35:55 [vllm.py:985] Cudagraph is disabled under eager mode
-INFO 04-18 21:35:55 [compilation.py:289] Enabled custom fusions: norm_quant, act_quant
-(EngineCore pid=1958655) INFO 04-18 21:35:56 [core.py:103] Initializing a V1 LLM engine (v0.18.1) with config: model='/home/x12dpg/hjx/Pandora-RAG/models/Meta-Llama-3.1-8B-Instruct', speculative_config=None, tokenizer='/home/x12dpg/hjx/Pandora-RAG/models/Meta-Llama-3.1-8B-Instruct', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=True, dtype=torch.bfloat16, max_seq_len=8192, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=False, quantization=None, enforce_eager=True, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=/home/x12dpg/hjx/Pandora-RAG/models/Meta-Llama-3.1-8B-Instruct, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.NONE: 0>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['all'], 'splitting_ops': [], 'compile_mm_encoder': False, 'compile_sizes': [], 'compile_ranges_endpoints': [8192], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False}, 'max_cudagraph_capture_size': 0, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': True, 'static_all_moe_layers': []}
-(EngineCore pid=1958655) INFO 04-18 21:35:56 [parallel_state.py:1395] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://10.20.1.171:55167 backend=nccl
-(EngineCore pid=1958655) INFO 04-18 21:35:56 [parallel_state.py:1717] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A, EPLB rank N/A
-(EngineCore pid=1958655) INFO 04-18 21:35:56 [gpu_model_runner.py:4481] Starting to load model /home/x12dpg/hjx/Pandora-RAG/models/Meta-Llama-3.1-8B-Instruct...
-(EngineCore pid=1958655) INFO 04-18 21:35:57 [cuda.py:317] Using FLASH_ATTN attention backend out of potential backends: ['FLASH_ATTN', 'FLASHINFER', 'TRITON_ATTN', 'FLEX_ATTENTION'].
-(EngineCore pid=1958655) INFO 04-18 21:35:57 [flash_attn.py:598] Using FlashAttention version 2
-(EngineCore pid=1958655) Loading safetensors checkpoint shards:   0% Completed | 0/4 [00:00<?, ?it/s]
-(EngineCore pid=1958655) Loading safetensors checkpoint shards:  25% Completed | 1/4 [00:00<00:02,  1.23it/s]
-(EngineCore pid=1958655) Loading safetensors checkpoint shards:  50% Completed | 2/4 [00:01<00:01,  1.08it/s]
-(EngineCore pid=1958655) Loading safetensors checkpoint shards:  75% Completed | 3/4 [00:02<00:00,  1.05it/s]
-(EngineCore pid=1958655) Loading safetensors checkpoint shards: 100% Completed | 4/4 [00:03<00:00,  1.39it/s]
-(EngineCore pid=1958655) Loading safetensors checkpoint shards: 100% Completed | 4/4 [00:03<00:00,  1.26it/s]
-(EngineCore pid=1958655) 
-(EngineCore pid=1958655) INFO 04-18 21:36:00 [default_loader.py:384] Loading weights took 3.21 seconds
-(EngineCore pid=1958655) INFO 04-18 21:36:01 [gpu_model_runner.py:4566] Model loading took 14.99 GiB memory and 3.633609 seconds
-(EngineCore pid=1958655) INFO 04-18 21:36:03 [gpu_worker.py:456] Available KV cache memory: 4.88 GiB
-(EngineCore pid=1958655) INFO 04-18 21:36:03 [kv_cache_utils.py:1316] GPU KV cache size: 39,936 tokens
-(EngineCore pid=1958655) INFO 04-18 21:36:03 [kv_cache_utils.py:1321] Maximum concurrency for 8,192 tokens per request: 4.88x
-(EngineCore pid=1958655) INFO 04-18 21:36:03 [core.py:281] init engine (profile, create kv cache, warmup model) took 2.04 seconds
-(EngineCore pid=1958655) WARNING 04-18 21:36:03 [vllm.py:809] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
-(EngineCore pid=1958655) WARNING 04-18 21:36:03 [vllm.py:820] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
-(EngineCore pid=1958655) INFO 04-18 21:36:03 [vllm.py:985] Cudagraph is disabled under eager mode
-INFO 04-18 21:36:03 [llm.py:391] Supported tasks: ['generate']
-Model and tokenizer loaded successfully.
-Number of prompts: 15904
-  0%|          | 0/32 [00:00<?, ?it/s]已终止

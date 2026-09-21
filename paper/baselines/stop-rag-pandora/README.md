@@ -219,7 +219,7 @@ python scripts/stop_rag_make_pareto.py
 - `results/stop_rag_online_pareto_frontier.csv`
 - `results/stop_rag_matched_budget.csv`
 - `results/stop_rag_pareto_{hotpotqa,musique,2wiki}.png`
-- `docs/stop_rag_threshold_sweep.md`
+- `docs/reports/baselines/stop_rag_threshold_sweep.md`
 
 ### （可选）LLM-Stop 基线
 

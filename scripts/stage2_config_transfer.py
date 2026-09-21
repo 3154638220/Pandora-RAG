@@ -368,7 +368,7 @@ def main() -> None:
             transfer_rows.append(row)
 
     results_dir = root / "results"
-    docs_dir = root / "docs"
+    docs_dir = root / "docs" / "reports" / "stage2"
     candidate_csv = results_dir / f"{args.out_prefix}_candidate_summary.csv"
     shared_csv = results_dir / f"{args.out_prefix}_shared_default.csv"
     transfer_csv = results_dir / f"{args.out_prefix}_source_transfer.csv"

@@ -17,7 +17,7 @@ Usage:
 ``--skip-prepare`` 表示「跳过已具备完整 ``data/processed`` 与 manifest 的数据集的 prepare」；若多数据集串联时某一数据集尚缺这些文件，则**仅对该数据集自动执行** ``prepare_data``（从 HF 拉取并写出），不会重算已有产物的数据集。
 
 数据划分默认 Train=4000 / Calib=1000 / Dev=1000 / Test=1000；无独立 test split 时从 validation 划 test，
-若 validation 总条数不足 Calib+Dev+Test，则自动收窄 test（保证 Calib/Dev 满额），详见 docs/experiments.md A2。
+若 validation 总条数不足 Calib+Dev+Test，则自动收窄 test（保证 Calib/Dev 满额），详见 docs/active/experiments.md A2。
 NLI 默认 CPU（NLI_DEVICE）。权重可放任意盘：设 NLI_MODEL_DIR 指向本地下载目录
 （如 models/cross-encoder-nli-deberta-v3-small）即离线加载。
 """
@@ -143,7 +143,7 @@ class Stage1Config:
 
     @property
     def docs_dir(self) -> Path:
-        return self.root_dir / "docs"
+        return self.root_dir / "docs" / "reports" / "stage1"
 
 
 def _ensure_dirs(cfg: Stage1Config) -> None:
@@ -192,7 +192,7 @@ def _heuristic_nli(question: str, context: str) -> Tuple[float, float]:
 
 
 class NLICrossEncoderScorer:
-    """cross-encoder/nli-deberta-v3-small：文档 vs 问题+历史上下文（docs/experiments.md B2）。"""
+    """cross-encoder/nli-deberta-v3-small：文档 vs 问题+历史上下文（docs/active/experiments.md B2）。"""
 
     DEFAULT_HUB_ID = "cross-encoder/nli-deberta-v3-small"
 
@@ -296,7 +296,7 @@ def _resolve_hidden_state_device(torch_module: Any) -> str:
 
 def _resolve_local_llama_weights_dir(cfg: Stage1Config) -> Optional[Path]:
     """
-    解析 Meta-Llama-3.1-8B-Instruct 本地权重目录（见 docs/STORAGE_LAYOUT.md：优先 --root-dir、再仓库 models/、再 PANDORA_MODELS_ROOT）。
+    解析 Meta-Llama-3.1-8B-Instruct 本地权重目录（见 docs/active/STORAGE_LAYOUT.md：优先 --root-dir、再仓库 models/、再 PANDORA_MODELS_ROOT）。
     顺序：--root-dir 下 models/ → 本仓库根目录 models/ → 环境变量 PANDORA_MODELS_ROOT。
     """
     name = "Meta-Llama-3.1-8B-Instruct"
@@ -557,7 +557,7 @@ def _load_hf_split(dataset_name: str, split_name: str) -> Optional[Dataset]:
 
 def prepare_data(cfg: Stage1Config, dataset_name: str) -> Dict[str, int]:
     """
-    按 docs/experiments.md：Train/Calib/Dev/Test 四切分，id 互不重叠；Calib+Dev 均从同一条 validation
+    按 docs/active/experiments.md：Train/Calib/Dev/Test 四切分，id 互不重叠；Calib+Dev 均从同一条 validation
     池中用 seed 打乱后顺序切出，专用于后续 E-value / CP 校准（严禁与 Test 重叠）。
     """
     rng = random.Random(cfg.seed)

@@ -638,9 +638,7 @@ def main() -> None:
     else:
         print("Skip E-value triple: missing hotpot JSONs.")
 
-    stop_in = root / "baselines" / "stop-rag-pandora" / "results"
-    if not stop_in.is_dir():
-        stop_in = root / "papar" / "code" / "baselines" / "stop-rag-pandora" / "results"
+    stop_in = root / "paper" / "baselines" / "stop-rag-pandora" / "results"
     if stop_in.is_dir():
         _plot_stop_rag_1x3(stop_in, res, out_dir / "stop_rag_pareto_1x3.pdf", dpi)
     else:

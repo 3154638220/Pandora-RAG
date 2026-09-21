@@ -1,8 +1,8 @@
 **项目名称：** Pandora-RAG: Adaptive Stopping for Multi-Hop Retrieval with Anytime-Valid Risk Control
 （Pandora-RAG：基于任意时刻有效风险控制的多跳检索自适应停止）
-**目标会议：** NeurIPS 2026
+**目标会议：** WWW 2027
 
-**说明文档**（除本 README 外，仓库内 Markdown 均集中在 `[docs/](docs/)`：`plan.md`、`experiments.md`、Stage 报告与特征诊断等。）
+**入口说明：** 当前实验代码保留在根目录；有效协议和项目状态见 `[docs/active/](docs/active/)`，阶段报告见 `[docs/reports/](docs/reports/)`，论文工作区见 `[paper/](paper/)`，审稿材料见 `[reviews/](reviews/)`。
 
 ---
 
@@ -99,16 +99,16 @@ E-value 的核心定位是**部署安全层 / 风险仪表盘**，而非“自�
 - **质量指标**：F1 Score, Exact Match (EM)
 - **效率指标**：Average Retrieval Steps (平均检索轮数), Latency (延迟)
 - **风险监控**：E-wealth 轨迹、触达 `1/α` 的告警语义（Ville 型 anytime-valid 解释见 Phase 3）
-- **Selective Prediction（可选）**：当样本处理前 E-wealth 已达 `1/α`（带数值容差）时拒答该样本；报告 **Coverage**（回答比例）与 **Selective accuracy**（回答子集中 F_1 \ge \gamma 的比例），见 `results/stage3_selective_ca_*.png` 与 `docs/stage3_narrative.md` §2.6
+- **Selective Prediction（可选）**：当样本处理前 E-wealth 已达 `1/α`（带数值容差）时拒答该样本；报告 **Coverage**（回答比例）与 **Selective accuracy**（回答子集中 F_1 \ge \gamma 的比例），见 `results/stage3_selective_ca_*.png` 与 `docs/reports/stage3/stage3_narrative.md` §2.6
 
 ### 3. 实验落地四大阶段 (Implementation Steps)
 
 #### Phase 1: 数据收集与 Oracle 验证 (可行性验证)
 
 - **操作**：在训练集上，强制执行完整的 $K$ 步检索（设 $K=5$）。记录每一步的文档 $d_k$、答案质量 $Q(s_k)$ 以及对应的 LLM 隐藏状态 $h_k$。
-- **检索器**：Stage1 支持 `--retriever-backend bm25`（默认）或 `**contriever_bge`**（`facebook/contriever-msmarco` + `BAAI/bge-reranker-v2-m3`）。切换后端须清空 `cache/trajectories` 与 `cache/features` 后重跑；详见 `docs/experiments.md` **B1** 与根目录 `.env.example`。
-- **vLLM（Linux）**：若遇 `libstdc++.so.6` / `CXXABI_1.3.15` 或健康检查脚本里 `echo` 与状态码之间须有空格等注意事项，见 `docs/experiments.md` **B2**（`vLLM（Linux）与 libstdc++ / LD_LIBRARY_PATH`）及 `.env.example` 中对应注释。
-- **HF 缓存**：运行 Stage1 / 下载脚本时默认 `**HF_HOME=<仓库>/.hf_cache`**，避免沿用损坏的旧路径；覆盖方式见 `docs/STORAGE_LAYOUT.md`。
+- **检索器**：Stage1 支持 `--retriever-backend bm25`（默认）或 `**contriever_bge`**（`facebook/contriever-msmarco` + `BAAI/bge-reranker-v2-m3`）。切换后端须清空 `cache/trajectories` 与 `cache/features` 后重跑；详见 `docs/active/experiments.md` **B1** 与根目录 `.env.example`。
+- **vLLM（Linux）**：若遇 `libstdc++.so.6` / `CXXABI_1.3.15` 或健康检查脚本里 `echo` 与状态码之间须有空格等注意事项，见 `docs/active/experiments.md` **B2**（`vLLM（Linux）与 libstdc++ / LD_LIBRARY_PATH`）及 `.env.example` 中对应注释。
+- **HF 缓存**：运行 Stage1 / 下载脚本时默认 `**HF_HOME=<仓库>/.hf_cache`**，避免沿用损坏的旧路径；覆盖方式见 `docs/active/STORAGE_LAYOUT.md`。
 - **Oracle 计算（主线上界）**：对每条轨迹用已知 $Q(s_k)$ 与步级成本 $c_k$ 做**后向归纳 DP**，得到实例最优停止步与逐步标签 `step_targets`（含 $V_{k+1}-c_{k+1}$、`margin`、`action_label`），并写入 `artifacts/oracle/{dataset}/test_oracle_labels.jsonl`。CLI：`--oracle-cost-metric {fixed,token,latency}`；非 `fixed` 时 Stage1 Pareto 横轴为平均累计归一化成本。
 - **全局 Weitzman 基线**：仍在训练集上估计每步增益分布并解全局 $r_k^*$，在 Pareto 图中以 **Global-Weitzman** 点与 **Oracle（DP）** 对比，体现「静态阈值 vs 上下文 Oracle」的差距。
 - **实验**：以 DP Oracle 为天花板绘制 Stage1 Pareto；可选分析 Global-Weitzman 作为非 Oracle 的对照。
@@ -127,7 +127,7 @@ E-value 的核心定位是**部署安全层 / 风险仪表盘**，而非“自�
 - **vs Conformal Prediction**：Split CP 在当前自适应停止场景下增加 40–56% 步数且 F1 反降 1–4pp；E-value 步数增加 < 2% 且 F1 基本持平。这里的重点是：CP 更像离线 marginal coverage 工具，而 E-value 更适合 optional-stopping-safe 的部署期监控。
 - **分布漂移检测**：E-wealth trace 在 sudden/gradual/periodic shift 下均快速响应（所有数据集触及 cap），而 CP 的固定阈值完全无法感知分布变化。
 - **检测后干预（拒答）**：`python -m stage3.run_stage3` 在输出 `stage3_evalue_*.json` 时同步写入 `wealth_trace` 与 `selective_prediction_abstain`，用于 coverage–accuracy 分析（与主实验 γ、α 网格一致重跑即可刷新）。
-- **详细叙事**：见 `[docs/stage3_narrative.md](docs/stage3_narrative.md)`，包含论文 Figure/Table 规划和审稿人 Q&A 预案。
+- **详细叙事**：见 `[docs/reports/stage3/stage3_narrative.md](docs/reports/stage3/stage3_narrative.md)`，包含论文 Figure/Table 规划和审稿人 Q&A 预案。
 
 #### Phase 4: PPO 联合微调 (Optional/Correction)
 
@@ -148,13 +148,13 @@ E-value 的核心定位是**部署安全层 / 风险仪表盘**，而非“自�
 
 ### 2. 动态停止的强 SOTA (Dynamic Stopping)
 
-- **Stop-RAG** *(NAACL 2024)*：基于 Q-learning 的动态停止 RAG。（**最直接的竞争对手**，但无错误率控制保障）。与主实验 **同 id、同切分** 的复现见 `[baselines/Stop-RAG/README.md](baselines/Stop-RAG/README.md)`（Pandora 对齐路径；勿使用上游 `download.sh` 子采样划分做 head-to-head）。
+- **Stop-RAG** *(NAACL 2024)*：基于 Q-learning 的动态停止 RAG。（**最直接的竞争对手**，但无错误率控制保障）。与主实验 **同 id、同切分** 的复现见 `[paper/baselines/Stop-RAG/README.md](paper/baselines/Stop-RAG/README.md)`（Pandora 对齐路径；勿使用上游 `download.sh` 子采样划分做 head-to-head）。
 - **ITER-RETGEN** *(EMNLP 2023)*：基于大模型自我评估的迭代生成。
 
 #### Stop-RAG 对比口径
 
 - Pandora 的主设定保持 Stage2 Phase C 的 `**F1 - λ·cost` + `GW(dev)` 步数上界约束**，不把纯 `max-F1` 阈值作为主结果。
-- 与 Stop-RAG 的公平 head-to-head 必须使用 **同切分、同样本 id**，且 Stop-RAG 只能采用 `[stop_rag_test.sh](baselines/Stop-RAG/README.md)` 的**在线早停**结果。
+- 与 Stop-RAG 的公平 head-to-head 必须使用 **同切分、同样本 id**，且 Stop-RAG 只能采用 `[stop_rag_test.sh](paper/baselines/Stop-RAG/README.md)` 的**在线早停**结果。
 - 主预算指标统一为 `**avg_steps`**；若写成成本，可等价记为 `cost = c * t`，其中 `t` 为在线检索轮数，但主文更建议直接报步数。
 - 主表应报 `**F1/EM @ matched avg_steps**` 或“达到同 F1 所需的 `avg_steps`”；主图应画两边 threshold sweep 的 `**F1 vs avg_steps` Pareto curve**。
 - `best-F1 vs best-F1` 只建议放 appendix，作为 quality-first 补充，不承载主 claim。

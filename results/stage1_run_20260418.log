@@ -1,50 +1,0 @@
-2026-04-18 10:20:16,905 [INFO] HiddenStateExtractor 选用剩余显存最多的 GPU: cuda:2 (约 23.29 GiB 空闲)
-`torch_dtype` is deprecated! Use `dtype` instead!
-Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards:  25%|██▌       | 1/4 [00:00<00:02,  1.45it/s]Loading checkpoint shards:  50%|█████     | 2/4 [00:01<00:01,  1.29it/s]Loading checkpoint shards:  75%|███████▌  | 3/4 [00:02<00:00,  1.28it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:02<00:00,  1.88it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:02<00:00,  1.62it/s]
-2026-04-18 10:20:23,070 [INFO] HiddenStateExtractor ready: model=models/Meta-Llama-3.1-8B-Instruct, device=cuda:2, max_length=2048
-2026-04-18 10:20:23,070 [INFO] ===== Stage1 dataset: hotpotqa =====
-2026-04-18 10:20:24,058 [INFO] trajectory::hotpotqa/train 续跑模式：已完成 4000 条，跳过重复。
-2026-04-18 10:20:24,059 [INFO] trajectory::hotpotqa/train 已全部完成，无需重跑。
-2026-04-18 10:20:24,134 [INFO] trajectory::hotpotqa/calib 续跑模式：已完成 1000 条，跳过重复。
-2026-04-18 10:20:24,134 [INFO] trajectory::hotpotqa/calib 已全部完成，无需重跑。
-2026-04-18 10:20:24,199 [INFO] trajectory::hotpotqa/dev 续跑模式：已完成 1000 条，跳过重复。
-2026-04-18 10:20:24,200 [INFO] trajectory::hotpotqa/dev 已全部完成，无需重跑。
-2026-04-18 10:20:24,276 [INFO] trajectory::hotpotqa/test 续跑模式：已完成 1000 条，跳过重复。
-2026-04-18 10:20:24,276 [INFO] trajectory::hotpotqa/test 已全部完成，无需重跑。
-2026-04-18 10:20:24,626 [INFO] Step 1: n=4000, mean_gain=0.4525, r*=0.8717
-2026-04-18 10:20:24,626 [INFO] Step 2: n=4000, mean_gain=0.1682, r*=0.7154
-2026-04-18 10:20:24,627 [INFO] Step 3: n=3983, mean_gain=-0.0025, r*=0.2445
-2026-04-18 10:20:24,627 [INFO] Step 4: n=3975, mean_gain=0.0027, r*=0.2608
-2026-04-18 10:20:24,628 [INFO] Step 5: n=3971, mean_gain=0.0098, r*=0.2394
-2026-04-18 10:20:42,164 [INFO] ===== Stage1 dataset: musique =====
-2026-04-18 10:20:42,904 [INFO] trajectory::musique/train 续跑模式：已完成 4000 条，跳过重复。
-2026-04-18 10:20:42,905 [INFO] trajectory::musique/train 已全部完成，无需重跑。
-2026-04-18 10:20:42,989 [INFO] trajectory::musique/calib 续跑模式：已完成 1000 条，跳过重复。
-2026-04-18 10:20:42,989 [INFO] trajectory::musique/calib 已全部完成，无需重跑。
-2026-04-18 10:20:43,065 [INFO] trajectory::musique/dev 续跑模式：已完成 1000 条，跳过重复。
-2026-04-18 10:20:43,065 [INFO] trajectory::musique/dev 已全部完成，无需重跑。
-2026-04-18 10:20:43,104 [INFO] trajectory::musique/test 续跑模式：已完成 417 条，跳过重复。
-2026-04-18 10:20:43,104 [INFO] trajectory::musique/test 已全部完成，无需重跑。
-2026-04-18 10:20:43,287 [INFO] Step 1: n=4000, mean_gain=0.1451, r*=0.4857
-2026-04-18 10:20:43,287 [INFO] Step 2: n=4000, mean_gain=0.1866, r*=0.6945
-2026-04-18 10:20:43,288 [INFO] Step 3: n=4000, mean_gain=0.0069, r*=0.2794
-2026-04-18 10:20:43,288 [INFO] Step 4: n=4000, mean_gain=0.0128, r*=0.2437
-2026-04-18 10:20:43,288 [INFO] Step 5: n=4000, mean_gain=-0.0021, r*=0.1538
-2026-04-18 10:20:59,296 [INFO] ===== Stage1 dataset: 2wiki =====
-2026-04-18 10:20:59,666 [INFO] trajectory::2wiki/train 续跑模式：已完成 4000 条，跳过重复。
-2026-04-18 10:20:59,666 [INFO] trajectory::2wiki/train 已全部完成，无需重跑。
-2026-04-18 10:20:59,742 [INFO] trajectory::2wiki/calib 续跑模式：已完成 1000 条，跳过重复。
-2026-04-18 10:20:59,742 [INFO] trajectory::2wiki/calib 已全部完成，无需重跑。
-2026-04-18 10:20:59,803 [INFO] trajectory::2wiki/dev 续跑模式：已完成 1000 条，跳过重复。
-2026-04-18 10:20:59,803 [INFO] trajectory::2wiki/dev 已全部完成，无需重跑。
-2026-04-18 10:20:59,861 [INFO] trajectory::2wiki/test 续跑模式：已完成 1000 条，跳过重复。
-2026-04-18 10:20:59,862 [INFO] trajectory::2wiki/test 已全部完成，无需重跑。
-2026-04-18 10:21:00,229 [INFO] Step 1: n=4000, mean_gain=0.1430, r*=0.6089
-2026-04-18 10:21:00,229 [INFO] Step 2: n=4000, mean_gain=0.2740, r*=0.8075
-2026-04-18 10:21:00,230 [INFO] Step 3: n=4000, mean_gain=-0.0137, r*=0.4532
-2026-04-18 10:21:00,230 [INFO] Step 4: n=4000, mean_gain=0.0066, r*=0.4392
-2026-04-18 10:21:00,231 [INFO] Step 5: n=4000, mean_gain=-0.0022, r*=0.3738
-2026-04-18 10:21:17,601 [INFO] Stage1 complete. Report: docs/stage1_report.md
-2026-04-18 10:21:17,601 [INFO] hotpotqa | cached=7000 | feat_missing=0.0000 | oracle_gain=0.1529
-2026-04-18 10:21:17,601 [INFO] musique | cached=6417 | feat_missing=0.0000 | oracle_gain=0.1242
-2026-04-18 10:21:17,601 [INFO] 2wiki | cached=7000 | feat_missing=0.0000 | oracle_gain=0.1897

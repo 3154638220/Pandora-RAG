@@ -30,7 +30,7 @@ Usage:
   python -m stage2.run_stage2 --per-dataset-optimal --probe-target f1 --sequence-gru --artifact-suffix pdopt_seq_gru
   # Lite Probe（部署口径浅层：步数/检索分/廉价词面，无 NLI/熵/自洽/ROUGE 边际新颖度等）
   python -m stage2.run_stage2 --per-dataset-optimal --probe-feature-mode lite --artifact-suffix probe_lite
-  （汇总报告写入 docs/stage2_report*.md；CSV/PNG 仍在 results/。rethreshold-only：加载已有 checkpoint，不重训。）
+  （汇总报告写入 docs/reports/stage2/stage2_report*.md；CSV/PNG 仍在 results/。rethreshold-only：加载已有 checkpoint，不重训。）
 """
 
 from __future__ import annotations
@@ -142,7 +142,7 @@ def effective_shallow_dim(cfg: Stage2Config) -> int:
 # D4：ROUGE-L 用截断词序列，避免超长 retrieved_doc 导致 LCS 过慢
 _D4_ROUGE_MAX_TOKENS = 256
 
-# Per-dataset 最优：来自 Stage2 消融（dev 选参，见 docs/plan-04-10.md §二.2）
+# Per-dataset 最优：来自 Stage2 消融（dev 选参，见 docs/plans/plan-04-10.md §二.2）
 # 值：(compress_dim, train_margin_min_abs, probe_target, hidden_branch_residual)
 # 2026-04-11 修正：三数据集均以 binary 头为优。
 # 旧注"HotpotQA/MuSiQue binary 与 f1 数值相同"及"2Wiki f1 更优"均源于将旧 binary 运行结果
@@ -237,7 +237,7 @@ class Stage2Config:
 
     @property
     def docs_dir(self) -> Path:
-        return self.root_dir / "docs"
+        return self.root_dir / "docs" / "reports" / "stage2"
 
 
 class ProbeDataset(Dataset):
@@ -3487,7 +3487,7 @@ def parse_args() -> argparse.Namespace:
         help="按消融结论为每个数据集单独设置 compress_dim、train_margin_min_abs 与 probe_target（覆盖 "
         "--compress-dim / --train-margin-min-abs / --probe-target）：hotpotqa→256/0+binary；"
         "musique→256/0+binary；2wiki→64/0.02+binary（2026-04-11 修正：三数据集均为 binary）。"
-        "详见 docs/plan-04-10.md §二.2。",
+        "详见 docs/plans/plan-04-10.md §二.2。",
     )
     parser.add_argument(
         "--seq-history-features",

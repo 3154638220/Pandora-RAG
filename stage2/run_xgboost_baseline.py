@@ -2,7 +2,7 @@
 Phase D2：在 Stage2 与 MLP 相同的 (浅层+hidden, y, margin 权重) 上训练 XGBoost，网格搜索超参，
 dev 上用与 Neural Probe 相同的 Phase C 阈值逻辑，test 上汇报 F1 / 步数，并与 Global-Weitzman 对照。
 
-产出：docs/stage2_xgboost_baseline.md、results/stage2_xgboost_baseline.json
+产出：docs/reports/stage2/stage2_xgboost_baseline.md、results/stage2_xgboost_baseline.json
 
 用法：
   python -m stage2.run_xgboost_baseline --datasets hotpotqa,musique,2wiki

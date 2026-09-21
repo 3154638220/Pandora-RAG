@@ -1,35 +1,29 @@
 # Paper Material Index
 
-This directory is a lightweight bundle for writing the paper on another
-machine. It intentionally excludes model weights, caches, raw datasets, and
-long run logs.
+`paper/` is the writing and paper-material workspace. It deliberately excludes
+model weights, caches, raw datasets, and long run logs.
 
 ## Start Here
 
-- `source/Pandora-RAG.tex`: current LaTeX draft.
-- `source/neurips_project_brief.md`: compact project framing for NeurIPS-style writing.
-- `source/Nips-suggestion.md`: writing and positioning suggestions.
-- `docs/stage3_results_summary.md`: concise Stage 3 result summary.
-- `docs/stage3_narrative.md`: narrative text for the final stage.
-- `docs/stage3_significance_report.md`: significance testing notes (default `pdopt_best` probes).
-- `docs/stage3_significance_report_alias_metric_aligned.md`: same tests for alias-metric–aligned main-text checkpoints (`--artifact-suffix alias_metric_aligned`).
-- `docs/stage2_final.md`: Stage 2 final report.
-- `docs/stage1_report.md`: Stage 1 report.
-- `docs/成果总结.md`: Chinese summary of the overall work.
+- [`source/www2027/`](source/www2027/): the only active WWW 2027 writing entry.
+- [`source/legacy_neurips/`](source/legacy_neurips/): archived NeurIPS drafts and historical writing suggestions.
+- [`source/notes/`](source/notes/): method, mathematics, experimental setup, comparison, and project-framing notes.
+- [`figs/`](figs/): figures selected for paper use.
+- [`results/`](results/): compact paper-facing result bundle.
+- [`repro/`](repro/): dependency hints and fixed split manifests.
+- [`baselines/`](baselines/): baseline documentation and records, including Stop-RAG.
 
-## Layout
+## Source of truth
 
-- `source/`: top-level writing material, method/math/experiment notes, current `.tex`, and `Stop-RAG.pdf`.
-- `docs/`: project reports, plans, ablation summaries, dataset/stage reports, and closeout notes.
-- `results/`: paper-useful figures, CSV tables, and JSON summaries copied from top-level `results/`.
-- `results/e2_predictive/`: predictive Stage 3 figure set and evaluation JSON.
-- `results/e4_fixed/`: fixed-threshold Stage 3 figure set and evaluation JSON.
-- `results/stop_rag_sweep_backup/`: Stop-RAG sweep summary CSVs and figures only, without raw online-test JSONL files.
-- `repro/`: dependency/env hints and data split manifests.
-- `baselines/`: baseline README and experiment-record notes.
+The full experiment code remains at the repository root (`stage1/`, `stage2/`,
+`stage3/`, `pretest/`, `qa_shared/`, and `scripts/`). The full experiment
+reports live under [`../docs/`](../docs/), while raw outputs remain under
+[`../results/`](../results/). Files under `paper/results/` and `paper/figs/`
+are curated copies for writing and should not be treated as a second execution
+source.
 
-## Notes
+## WWW 2027 convention
 
-- The bundle favors writing and figure/table lookup over full reproduction.
-- Full reproduction still depends on the original repository data, caches, checkpoints, and model directories.
-- Large raw files were left out deliberately to keep this directory portable.
+New manuscript files, appendices, submission notes, and version records belong
+under [`source/www2027/`](source/www2027/). Do not create new paper drafts in
+the repository root or revive the archived `paper/docs/` snapshot.

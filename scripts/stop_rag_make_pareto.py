@@ -28,10 +28,10 @@ import matplotlib.pyplot as plt
 
 
 ROOT = Path(__file__).resolve().parents[1]
-STOP_RAG_ROOT = ROOT / "baselines" / "stop-rag-pandora"
+STOP_RAG_ROOT = ROOT / "paper" / "baselines" / "stop-rag-pandora"
 STOP_RAG_RESULTS = STOP_RAG_ROOT / "results"
 RESULTS_DIR = ROOT / "results"
-DOCS_DIR = ROOT / "docs"
+DOCS_DIR = ROOT / "docs" / "reports" / "baselines"
 
 DATASET_TO_PANDORA = {
     "hotpotqa": "hotpotqa",

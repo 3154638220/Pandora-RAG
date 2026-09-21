@@ -378,7 +378,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--datasets", type=str, default="hotpotqa,musique,2wiki")
     parser.add_argument("--root-dir", type=str, default=".")
     parser.add_argument("--results-dir", type=str, default="results")
-    parser.add_argument("--docs-dir", type=str, default="docs")
+    parser.add_argument("--docs-dir", type=str, default="docs/reports/stage3")
     parser.add_argument("--artifact-suffix", type=str, default="pdopt_best")
     parser.add_argument(
         "--output-suffix",

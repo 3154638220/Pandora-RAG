@@ -582,7 +582,13 @@ def _generate_markdown_report(
     default_results_dir = (s3.root_dir / "results").resolve()
     if s3.results_dir.resolve() != default_results_dir:
         results_tag = f"_{s3.results_dir.name}"
-    report_path = s3.root_dir / "docs" / f"stage3_report_{dataset}{shift_tag}{results_tag}.md"
+    report_path = (
+        s3.root_dir
+        / "docs"
+        / "reports"
+        / "stage3"
+        / f"stage3_report_{dataset}{shift_tag}{results_tag}.md"
+    )
     report_path.parent.mkdir(parents=True, exist_ok=True)
 
     lines: List[str] = []
